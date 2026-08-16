@@ -7,16 +7,16 @@
 이 패키지는 GitHub 저장소에서 설치합니다.
 
 ```bash
-pi install https://github.com/spi-ca/pi-herdr-presence.git
+pi install git:github.com/spi-ca/pi-herdr-presence
 # 현재 프로젝트에만 설치
-pi install -l https://github.com/spi-ca/pi-herdr-presence.git
+pi install -l git:github.com/spi-ca/pi-herdr-presence
 ```
 
-코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 저장소 URL로 합니다.
+코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 저장소 source로 합니다.
 
 ```bash
-pi remove https://github.com/spi-ca/pi-herdr-presence.git
-pi remove -l https://github.com/spi-ca/pi-herdr-presence.git
+pi remove git:github.com/spi-ca/pi-herdr-presence
+pi remove -l git:github.com/spi-ca/pi-herdr-presence
 ```
 
 ## 활성화와 소유권
