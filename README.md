@@ -4,19 +4,19 @@
 
 ## 설치와 reload
 
-이 패키지는 `private`이므로 npm 배포 설치를 제공하지 않습니다. 개발/로컬 설치는 절대 경로를 사용합니다.
+이 패키지는 GitHub 저장소에서 설치합니다.
 
 ```bash
-pi install /absolute/path/to/pi-herdr-presence
+pi install https://github.com/spi-ca/pi-herdr-presence.git
 # 현재 프로젝트에만 설치
-pi install -l /absolute/path/to/pi-herdr-presence
+pi install -l https://github.com/spi-ca/pi-herdr-presence.git
 ```
 
-코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 정확한 경로로 합니다.
+코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 저장소 URL로 합니다.
 
 ```bash
-pi remove /absolute/path/to/pi-herdr-presence
-pi remove -l /absolute/path/to/pi-herdr-presence
+pi remove https://github.com/spi-ca/pi-herdr-presence.git
+pi remove -l https://github.com/spi-ca/pi-herdr-presence.git
 ```
 
 ## 활성화와 소유권
