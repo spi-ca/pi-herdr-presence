@@ -1,0 +1,46 @@
+%% Diagram source: docs/diagram/socket-resolution.mmd
+flowchart TB
+  classDef core stroke-width:3px
+  classDef boundary stroke-dasharray: 4 3
+  classDef cmux stroke-width:3px,stroke-dasharray: 2 2
+
+  subgraph Identity[identity.ts: identity]
+    direction LR
+    Env[CMUX_WORKSPACE_ID /<br/>CMUX_SURFACE_ID] --> UUIDCheck{Both present and<br/>RFC variant UUID v1-v5?}
+    UUIDCheck -->|no| NoIdentity[No identity:<br/>skip client creation]
+    UUIDCheck -->|yes| CmuxIdentity[CmuxIdentity]
+  end
+
+  subgraph Socket[identity.ts: socket path]
+    direction LR
+    Configured[CMUX_SOCKET_PATH<br/>trimmed] -->|set| Candidate1[Configured<br/>candidate only]
+    Configured -->|unset| Candidate2[Stable candidate:<br/>~/.local/state/cmux/cmux.sock]
+    Candidate1 --> Fingerprint
+    Candidate2 --> Fingerprint
+    Fingerprint[safeSocketFingerprint:<br/>absolute path, owner-only socket,<br/>lexical + resolved ancestor chain] -->|throws| NoSocket[No socket:<br/>skip client creation]
+    Fingerprint -->|ok| ValidSocket[Validated socket path<br/>+ dev/ino/uid fingerprint]
+  end
+
+  CmuxIdentity --> Gate
+  ValidSocket --> Gate
+  Gate{Identity and socket<br/>both resolved?}
+  Gate -->|no| Disabled[cmux client/output disabled;<br/>process-local observer may continue]
+  Gate -->|yes| ClientCreate[Create PresenceClient +<br/>UnixSocketTransport]
+
+  subgraph Hook[official-hook.ts: precedence]
+    direction LR
+    HookEnv{CMUX_PI_HOOKS_DISABLED<br/>== 1?}
+    HookEnv -->|yes| HookOff[Official hook<br/>detection skipped]
+    HookEnv -->|no| HookDir[PI_CODING_AGENT_DIR<br/>or ~/.pi/agent]
+    HookDir --> HookRead[Read extensions/<br/>cmux-session.ts]
+    HookRead -->|marker v2 found| HookDetected[Official hook detected]
+    HookRead -->|missing/unreadable| HookAbsent[No official hook]
+  end
+
+  HookDetected --> Precedence[Suppress native lifecycle,<br/>feed, meta, auto-title,<br/>resume fallback, local completion,<br/>and pi-subagent success native alert;<br/>external attention + pi-subagent error eligible]
+  HookAbsent --> OptIn[PresenceConfig opt-in flags<br/>gate each remaining feature]
+  HookOff --> OptIn
+
+  class CmuxIdentity,ValidSocket,ClientCreate core
+  class Env,Configured,Candidate1,Candidate2,Fingerprint,HookDir,HookRead,HookEnv boundary
+  class NoIdentity,NoSocket,Disabled,HookOff,HookDetected,HookAbsent,Precedence,OptIn boundary

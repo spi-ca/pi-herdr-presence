@@ -1,0 +1,51 @@
+%% Diagram source: docs/diagram/transport-state.mmd
+flowchart TB
+  classDef core stroke-width:3px
+  classDef boundary stroke-dasharray: 4 3
+  classDef cmux stroke-width:3px,stroke-dasharray: 2 2
+
+  subgraph Queue[BoundedSocketQueue.enqueue]
+    direction LR
+    Enqueue[enqueue work, key] --> Closed{Queue closed?}
+    Closed -->|yes| RejectClosed[Reject:<br/>queue is closed]
+    Closed -->|no| Coalesce{Same key already<br/>pending?}
+    Coalesce -->|yes| Merge[Replace pending work,<br/>share existing promise<br/>latest-write-wins]
+    Coalesce -->|no| Bound{queue.length<br/>>= maxQueue?}
+    Bound -->|yes| RejectFull[Reject:<br/>queue is full, drop]
+    Bound -->|no| Push[Push pending,<br/>register key, start drain]
+  end
+
+  Push --> Drain[Drain loop:<br/>shift next pending]
+  Drain --> Active[New AbortController<br/>marks active work]
+  Active --> Exchange
+  Exchange -->|resolve or reject| More{Queue empty or<br/>abandoned?}
+  More -->|no| Drain
+  More -->|yes| Idle[Drain finished]
+
+  subgraph Exchange[transport.ts: exchange]
+    direction LR
+    Before[Fingerprint socket<br/>before connect] --> Connect[net.createConnection]
+    Connect --> After[Fingerprint socket<br/>after connect]
+    After -->|mismatch| Changed[Reject: socket<br/>changed during connection]
+    After -->|match| Write[Write request line]
+    Write --> Read[Read until single<br/>newline-terminated line]
+    Read -->|buffered bytes<br/>exceed 16KB| TooLarge[Reject: response<br/>exceeds bound]
+    Read -->|end or close before<br/>complete LF response| Incomplete[Reject immediately:<br/>incomplete response]
+    Read -->|newline seen but<br/>extra bytes follow it| MultiLine[Reject: more than<br/>one response line]
+    Read -->|exactly one LF-terminated line| Ok[Resolve response line]
+    Connect -.timeout, abort signal,<br/>or socket error.-> Failed[Reject: timeout,<br/>aborted, or socket failure]
+  end
+
+  subgraph CloseLifecycle[UnixSocketTransport.close timeoutMs]
+    direction LR
+    CloseCall[close called] --> MarkClosed[closed = true]
+    MarkClosed --> Immediate{timeoutMs <= 0?}
+    Immediate -->|yes: bounded teardown| ImmediateAbort[Immediate zero-time abort:<br/>abandon = true, abort active exchange,<br/>reject undispatched, await drain]
+    Immediate -->|no| Race{Drain completes<br/>before timeout?}
+    Race -->|drain first| Settled[Reject any still-queued<br/>undispatched work]
+    Race -->|timeout first| Abandon[abandon = true,<br/>abort active exchange,<br/>reject undispatched]
+  end
+
+  class Push,Drain,Active,Write,Read,Ok core
+  class Enqueue,Closed,Coalesce,Merge,Bound,Before,Connect,After,CloseCall,MarkClosed,Race boundary
+  class RejectClosed,RejectFull,Changed,TooLarge,Incomplete,MultiLine,Failed,ImmediateAbort,Abandon,Settled,Idle boundary

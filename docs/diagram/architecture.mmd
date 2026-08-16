@@ -1,0 +1,39 @@
+%% Diagram source: docs/diagram/architecture.mmd
+flowchart TB
+  classDef core stroke-width:3px
+  classDef boundary stroke-dasharray: 4 3
+  classDef cmux stroke-width:3px,stroke-dasharray: 2 2
+
+  subgraph Pi[Pi process]
+    direction LR
+    Lifecycle[Pi lifecycle] --> Hooks[Hooks]
+    Events[Process-local events<br/>update / remove / ready] --> Hooks
+  end
+
+  Hooks --> Runtime[PresenceRuntime]
+
+  subgraph Flow[Presence pipeline]
+    direction LR
+    Validate[Strict validation<br/>retained state / todo / usage] --> Present[Presentation]
+    Target[Identity + socket<br/>validation] --> Client[PresenceClient]
+    Present --> Client
+  end
+  Runtime --> Validate
+  Runtime --> Target
+
+  subgraph Delivery[cmux output]
+    direction LR
+    V1[Configuration gate<br/>V1 status / progress / log] --> Transport[Serial UnixSocketTransport]
+    V2[Exact V2 capability gate<br/>optional methods only] --> Transport
+    Drop[Drop / disable output]
+  end
+  Client --> V1
+  Client --> V2
+  Transport -->|socket only| Cmux[cmux]
+
+  Runtime -. best-effort failures<br/>never interrupt Pi work .-> Drop
+  Client -. best-effort failures .-> Drop
+
+  class Runtime,Validate,Present,Client core
+  class Events,Hooks,Target,Transport,Drop boundary
+  class Cmux cmux
