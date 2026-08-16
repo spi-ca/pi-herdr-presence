@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-cmux-presence",
+      "name": "pi-herdr-presence",
       "devDependencies": {
         "@earendil-works/pi-coding-agent": "^0.82.0",
         "@types/node": "^25.2.3",

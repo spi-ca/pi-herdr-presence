@@ -1,20 +1,17 @@
 {
-  "name": "pi-cmux-presence",
+  "name": "pi-herdr-presence",
   "version": "0.1.0",
-  "description": "Socket-only cmux presence observer for Pi",
+  "description": "Socket-only Herdr presence observer for Pi TUI sessions",
   "private": true,
   "type": "module",
   "main": "index.ts",
-  "files": ["index.ts", "src/**/*", "docs/**/*.md", "docs/diagram/**/*", "AGENTS.md", "README.md", "CHANGELOG.md", "LICENSE"],
-  "keywords": ["pi-package", "cmux", "presence"],
-  "pi": {
-    "extensions": ["./index.ts"]
-  },
+  "files": ["index.ts", "src/**/*", "docs/**/*.md", "AGENTS.md", "README.md", "CHANGELOG.md", "LICENSE"],
+  "keywords": ["pi-package", "herdr", "presence"],
+  "pi": { "extensions": ["./index.ts"] },
   "scripts": {
     "test": "bun test --pass-with-no-tests",
     "check": "bunx tsc --noEmit",
-    "ci": "bun run check && bun run test",
-    "diagram:render": "set -e; for src in docs/diagram/*.mmd; do stem=\"${src%.mmd}\"; bunx @mermaid-js/mermaid-cli -p docs/diagram/puppeteer-config.json -c docs/diagram/mermaid-config.json -i \"$src\" -o \"$stem.svg\" -b white; bunx @mermaid-js/mermaid-cli -p docs/diagram/puppeteer-config.json -c docs/diagram/mermaid-config.json -i \"$src\" -o \"$stem.png\" -b white -s 2; done"
+    "ci": "bun run check && bun run test"
   },
   "license": "MIT",
   "devDependencies": {
@@ -23,13 +20,7 @@
     "bun-types": "^1.3.14",
     "typescript": "^5.9.3"
   },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": {
-      "optional": true
-    }
-  },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } },
   "packageManager": "bun@1.3.14"
 }

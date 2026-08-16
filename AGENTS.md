@@ -1,7 +1,7 @@
-# pi-cmux-presence
+# pi-herdr-presence
 
-`pi-cmux-presence` is a Bun-based Pi extension that reports local presence to cmux through a Unix socket only. Use the declared `bun@1.3.14` package manager and run `bun run ci` before handoff.
+`pi-herdr-presence` is a Bun Pi extension reporting TUI-only local presence to Herdr through its supplied socket. Use `bun@1.3.14` and run `bun run ci` before handoff.
 
-Core invariants: no process/CLI execution, strict workspace/surface target validation, socket-only transport, and best-effort failures that never interrupt Pi work.
+Core invariants: only `HERDR_ENV=1`, `HERDR_SOCKET_PATH`, and `HERDR_PANE_ID`; no process/CLI/shell execution, polling, or subscriptions; request-per-connection transport; strict target/socket validation; output-only best-effort failures. Do not coexist with Herdr's managed `herdr-agent-state.ts` Pi integration.
 
-See [development notes](docs/development.md), [configuration](docs/configuration.md), and the [event contract](docs/event-contract.md).
+See `docs/development.md`, `docs/configuration.md`, and `docs/event-contract.md`.

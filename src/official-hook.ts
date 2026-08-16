@@ -2,28 +2,27 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const OFFICIAL_HOOK_MARKER = "cmux-pi-session-extension-marker v2";
+const MARKER = "HERDR_INTEGRATION_ID=pi";
+/** `unknown` means the managed integration cannot be safely ruled out. */
+export type OfficialHookStatus = "present" | "absent" | "unknown";
 
-export function expandHomeDirectory(value: string, homeDirectory = os.homedir()): string {
-  if (value === "~") return homeDirectory;
-  if (value.startsWith("~/")) return path.join(homeDirectory, value.slice(2));
-  return value;
+/**
+ * Detect the Herdr-managed Pi extension without executing it. Read failures are
+ * deliberately unknown, not absence: claiming a competing authority is unsafe.
+ */
+export async function officialHookStatus(env: NodeJS.ProcessEnv = process.env): Promise<OfficialHookStatus> {
+  const home = env.HOME?.trim() || os.homedir();
+  const base = env.PI_CODING_AGENT_DIR?.trim() || path.join(home, ".pi", "agent");
+  try {
+    const source = await fs.readFile(path.join(base, "extensions", "herdr-agent-state.ts"), "utf8");
+    // A managed asset without the expected marker is not safe evidence of absence.
+    return source.includes(MARKER) ? "present" : "unknown";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" ? "absent" : "unknown";
+  }
 }
 
+/** Compatibility helper; unknown is fail-closed just like a managed integration. */
 export async function officialHookDetected(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
-  if (env.CMUX_PI_HOOKS_DISABLED === "1") return false;
-
-  const homeDirectory = env.HOME?.trim() || os.homedir();
-  const configuredAgentDirectory = env.PI_CODING_AGENT_DIR?.trim();
-  const agentDirectory = configuredAgentDirectory
-    ? expandHomeDirectory(configuredAgentDirectory, homeDirectory)
-    : path.join(homeDirectory, ".pi", "agent");
-  const hookPath = path.join(agentDirectory, "extensions", "cmux-session.ts");
-
-  try {
-    const source = await fs.readFile(hookPath, "utf8");
-    return source.includes(OFFICIAL_HOOK_MARKER);
-  } catch {
-    return false;
-  }
+  return (await officialHookStatus(env)) !== "absent";
 }

@@ -1,0 +1,3 @@
+import {expect,test} from "bun:test";import {attentionText,compositeState,metadata} from "../src/presentation.js";
+const event={version:1 as const,sessionId:"s",generation:1,sequence:1,source:{id:"other",label:"secret /path prompt",kind:"task"},state:"error" as const,counts:{active:0,completed:0,failed:1},attention:"error" as const};
+test("composite state is deterministic and display text never copies producer text",()=>{expect(compositeState([event],false)).toBe("blocked");const a=attentionText(event,96)!;expect(a.body).not.toContain("secret");expect(JSON.stringify(metadata([event],"blocked",96))).not.toContain("/path");});

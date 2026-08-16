@@ -257,6 +257,8 @@ export class PresenceEventRegistry {
   acceptParsed(event: PresenceUpdate): boolean {
     if (event.sessionId !== this.sessionId) return false;
     const previous = this.fenceBySource.get(event.source.id);
+    // Generic producers share a fixed process-local budget. Unknown removes do
+    // not allocate fences, so they cannot consume this budget by themselves.
     if (!previous && this.fenceBySource.size >= MAX_SOURCES) return false;
     if (previous && (event.generation < previous.generation || (event.generation === previous.generation && event.sequence <= previous.sequence))) return false;
     this.fenceBySource.set(event.source.id, { generation: event.generation, sequence: event.sequence });
@@ -272,6 +274,8 @@ export class PresenceEventRegistry {
       || event.source.id === "pi"
       || event.source.id === "pi-todo") return { accepted: false };
     const previous = this.fenceBySource.get(event.source.id);
+    // Never allocate a tombstone for an unknown external remove: otherwise a
+    // same-process producer could consume all source fences without publishing.
     if (!previous
       || event.generation < previous.generation
       || (event.generation === previous.generation && event.sequence <= previous.sequence)) {

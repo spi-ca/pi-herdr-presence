@@ -1,338 +1,41 @@
-import { isPlainObject, isProtocolToken } from "./validation.js";
 import type { PresenceConfig } from "./config.js";
-import type { CmuxIdentity } from "./identity.js";
-import {
-  decodeV1Response,
-  decodeV2Response,
-  encodeV1,
-  encodeV2,
-  type V1Command,
-  type V2Method,
-} from "./protocol.js";
-import { UnixSocketTransport } from "./transport.js";
+import type { HerdrIdentity } from "./identity.js";
+import { decodeHerdrResponse, encodeHerdrRequest, type HerdrMethod } from "./protocol.js";
+import { HerdrSocketTransport, PresenceTransportError } from "./transport.js";
 
-const OPTIONAL_METHODS = new Set<V2Method>([
-  "notification.create_for_surface",
-  "surface.trigger_flash",
-  "feed.push",
-  "surface.resume.get",
-  "surface.resume.set",
-  "surface.resume.clear",
-  "workspace.set_auto_title",
-]);
+/** This extension takes over the official Pi authority only while it is absent. */
+export const LIFECYCLE_SOURCE = "herdr:pi";
+const OWNED_METADATA_TOKENS = ["active", "completed", "failed", "queued", "cancelled", "total", "progress", "tokens", "cost", "context"] as const;
+export type SessionRef = { agent_session_path: string } | { agent_session_id: string };
 
-function capabilities(value: unknown): Set<V2Method> {
-  try {
-    const allowed = ["protocol", "version", "methods", "access_mode", "socket_path"];
-    if (!isPlainObject(value)
-      || !Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.includes(key))
-      || value.protocol !== "cmux-socket"
-      || value.version !== 2
-      || !Array.isArray(value.methods)
-      || value.methods.length > 512
-      || !value.methods.every((method) => isProtocolToken(method))) {
-      return new Set();
-    }
-
-    return new Set(
-      value.methods.filter((method): method is V2Method => OPTIONAL_METHODS.has(method as V2Method)),
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-type ResumeBinding = { kind: "pi"; source: "agent-hook"; checkpoint_id: string };
-
-function resumeBinding(value: unknown): ResumeBinding | null | undefined {
-  try {
-    if (!isPlainObject(value) || !Object.hasOwn(value, "resume_binding")) return undefined;
-    const binding = value.resume_binding;
-    if (binding === null) return null;
-    if (!isPlainObject(binding)
-      || binding.kind !== "pi"
-      || binding.source !== "agent-hook"
-      || !isProtocolToken(binding.checkpoint_id)) {
-      return undefined;
-    }
-    return { kind: "pi", source: "agent-hook", checkpoint_id: binding.checkpoint_id };
-  } catch {
-    return undefined;
-  }
-}
-
+/** One request per connection is enforced by HerdrSocketTransport; this client never subscribes. */
 export class PresenceClient {
-  private nextId = 1;
-  private supported = new Set<V2Method>();
-  private closed = false;
-  private closeOperation: Promise<void> | null = null;
-  private ownsResumeFallback = false;
-  private resumeInstallOperation: Promise<void> | null = null;
-
-  constructor(
-    private readonly identity: CmuxIdentity,
-    private readonly transport: UnixSocketTransport,
-    private readonly config: PresenceConfig,
-  ) {}
-
-  async initialize(): Promise<void> {
-    const id = this.nextId++;
-    try {
-      const response = await this.transport.request(
-        encodeV2({ id, method: "system.capabilities", params: {} }),
-      );
-      this.supported = capabilities(decodeV2Response(response, id));
-    } catch {
-      this.supported.clear();
-    }
-  }
-
-  async initializeOwnedProgress(): Promise<void> {
-    // Run only after the runtime has made this client the current session owner.
-    if (this.config.progress) {
-      await this.v1({ command: "clear_progress", tab: this.identity.workspaceId }, "progress");
-    }
-  }
-
-  async status(
-    key: string,
-    label: string,
-    style: { icon: string; color: string; priority: number },
-  ): Promise<void> {
-    if (!this.config.sidebar) return;
-    await this.v1({
-      command: "set_status",
-      tab: this.identity.workspaceId,
-      panel: this.identity.surfaceId,
-      key,
-      label,
-      ...style,
-    }, `status:${key}`);
-  }
-
-  async clearStatus(key: string): Promise<void> {
-    if (!this.config.sidebar) return;
-    await this.v1({ command: "clear_status", tab: this.identity.workspaceId, key }, `status:${key}`);
-  }
-
-  async progress(value: number, label?: string): Promise<void> {
-    if (!this.config.progress) return;
-    await this.v1({ command: "set_progress", tab: this.identity.workspaceId, value, label }, "progress");
-  }
-
-  async clearProgress(): Promise<void> {
-    if (!this.config.progress) return;
-    await this.v1({ command: "clear_progress", tab: this.identity.workspaceId }, "progress");
-  }
-
-  async log(level: "info" | "success" | "warning" | "error", message: string): Promise<void> {
-    if (!this.config.log) return;
-    await this.v1({ command: "log", tab: this.identity.workspaceId, level, message });
-  }
-
-  async notify(title: string, body: string): Promise<void> {
-    if (!this.config.notifications) return;
-    await this.optional("notification.create_for_surface", {
-      workspace_id: this.identity.workspaceId,
-      surface_id: this.identity.surfaceId,
-      title,
-      body,
-    });
-  }
-
-  async flash(): Promise<void> {
-    if (!this.config.flash) return;
-    await this.optional("surface.trigger_flash", {
-      workspace_id: this.identity.workspaceId,
-      surface_id: this.identity.surfaceId,
-    }, "flash");
-  }
-
-  async setPiPid(): Promise<void> {
-    await this.v1({
-      command: "set_agent_pid",
-      tab: this.identity.workspaceId,
-      panel: this.identity.surfaceId,
-      key: "pi",
-      pid: process.pid,
-    }, "pi:pid");
-  }
-
-  async lifecycle(lifecycle: "running" | "idle"): Promise<void> {
-    await this.v1({
-      command: "set_agent_lifecycle",
-      tab: this.identity.workspaceId,
-      panel: this.identity.surfaceId,
-      key: "pi",
-      lifecycle,
-    }, "pi:lifecycle");
-  }
-
-  async clearPiPid(): Promise<void> {
-    await this.v1({
-      command: "clear_agent_pid",
-      tab: this.identity.workspaceId,
-      panel: this.identity.surfaceId,
-      key: "pi",
-    }, "pi:pid");
-  }
-
-  async meta(markdown: string): Promise<void> {
-    if (!this.config.metaBlock) return;
-    await this.v1({
-      command: "report_meta_block",
-      tab: this.identity.workspaceId,
-      key: "pi-presence",
-      markdown,
-      priority: 50,
-    }, "pi:meta");
-  }
-
-  async clearMeta(): Promise<void> {
-    if (!this.config.metaBlock) return;
-    await this.v1({
-      command: "clear_meta_block",
-      tab: this.identity.workspaceId,
-      key: "pi-presence",
-    }, "pi:meta");
-  }
-
-  async feed(
-    event: "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop",
-    sessionId: string,
-    tool?: { callId?: string; name?: string },
-  ): Promise<void> {
-    if (!this.config.feed) return;
-
-    const payload: Record<string, unknown> = {
-      session_id: sessionId,
-      hook_event_name: event,
-      _source: "pi",
-      workspace_id: this.identity.workspaceId,
-      surface_id: this.identity.surfaceId,
-    };
-    const isToolEvent = event === "PreToolUse" || event === "PostToolUse";
-    if (isToolEvent && tool?.callId) payload.tool_call_id = tool.callId;
-    if (isToolEvent && tool?.name) payload.tool_name = tool.name;
-
-    await this.optional("feed.push", {
-      workspace_id: this.identity.workspaceId,
-      surface_id: this.identity.surfaceId,
-      event: payload,
-    });
-  }
-
-  async autoTitle(title: string): Promise<void> {
-    if (!this.config.autoTitle) return;
-    await this.optional("workspace.set_auto_title", {
-      workspace_id: this.identity.workspaceId,
-      title,
-    });
-  }
-
-  async installResumeFallback(sessionId: string, command: string): Promise<void> {
-    const operation = this.installResumeFallbackNow(sessionId, command);
-    this.resumeInstallOperation = operation;
-    try {
-      await operation;
-    } finally {
-      if (this.resumeInstallOperation === operation) this.resumeInstallOperation = null;
-    }
-  }
-
-  async clearOwnedResumeFallback(sessionId: string): Promise<void> {
-    const pendingInstall = this.resumeInstallOperation;
-    if (pendingInstall) await pendingInstall.catch(() => {});
-    if (!this.ownsResumeFallback
-      || !this.config.resumeFallback
-      || !this.supported.has("surface.resume.clear")) {
-      return;
-    }
-
-    const verified = await this.getResume();
-    if (verified?.checkpoint_id === sessionId) {
-      await this.optional("surface.resume.clear", {
-        workspace_id: this.identity.workspaceId,
-        surface_id: this.identity.surfaceId,
-        checkpoint_id: sessionId,
-        source: "agent-hook",
-      });
-    }
-    this.ownsResumeFallback = false;
-  }
-
-  async close(timeoutMs?: number): Promise<void> {
-    if (this.closeOperation) return this.closeOperation;
-    this.closed = true;
-    this.closeOperation = this.transport.close(timeoutMs);
-    await this.closeOperation;
-  }
-
-  private async installResumeFallbackNow(sessionId: string, command: string): Promise<void> {
-    if (!this.config.resumeFallback
-      || !this.supported.has("surface.resume.get")
-      || !this.supported.has("surface.resume.set")) {
-      return;
-    }
-
-    const existing = await this.getResume();
-    // Any unparseable/nonmatching binding is treated as occupied rather than overwritten.
-    if (existing === undefined || (existing !== null && existing.checkpoint_id !== sessionId)) return;
-
-    await this.optional("surface.resume.set", {
-      workspace_id: this.identity.workspaceId,
-      surface_id: this.identity.surfaceId,
-      name: "Pi",
-      checkpoint_id: sessionId,
-      kind: "pi",
-      source: "agent-hook",
-      environment: {},
-      command,
-      auto_resume: true,
-    });
-    const verified = await this.getResume();
-    this.ownsResumeFallback = verified !== undefined
-      && verified !== null
-      && verified.checkpoint_id === sessionId;
-  }
-
-  private async getResume(): Promise<ResumeBinding | null | undefined> {
-    const result = await this.optional("surface.resume.get", {
-      workspace_id: this.identity.workspaceId,
-      surface_id: this.identity.surfaceId,
-    });
-    return result === undefined ? undefined : resumeBinding(result);
-  }
-
-  private async optional(
-    method: V2Method,
-    params: Record<string, unknown>,
-    key?: string,
-  ): Promise<unknown | undefined> {
-    return this.supported.has(method) ? await this.v2(method, params, key) : undefined;
-  }
-
-  private async v1(command: V1Command, key?: string): Promise<void> {
-    if (this.closed) return;
-    try {
-      decodeV1Response(await this.transport.request(encodeV1(command), key));
-    } catch {
-      // Best-effort observer.
-    }
-  }
-
-  private async v2(
-    method: V2Method,
-    params: Record<string, unknown>,
-    key?: string,
-  ): Promise<unknown | undefined> {
-    if (this.closed) return undefined;
-    const id = this.nextId++;
-    try {
-      const response = await this.transport.request(encodeV2({ id, method, params }), key);
-      return decodeV2Response(response, id);
-    } catch {
-      return undefined;
+  private sequence = Math.floor(Date.now() * 1000); private requestNumber = 0; private closed = false; private keyRevisions = new Map<string, number>();
+  constructor(private readonly identity: HerdrIdentity, private readonly transport: HerdrSocketTransport, private readonly config: PresenceConfig) {}
+  async reportSession(sessionRef: SessionRef, reason?: string): Promise<void> { await this.send("pane.report_agent_session", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, agent:"pi", seq:this.next(), ...(reason ? {session_start_source:reason}: {}), ...sessionRef }, "session"); }
+  async report(state: "idle"|"working"|"blocked"|"unknown", sessionRef: SessionRef, message?: string): Promise<void> { await this.send("pane.report_agent", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, agent:"pi", state, ...(message ? {message}: {}), seq:this.next(), ...sessionRef }, "agent"); }
+  async metadata(data: { title:string; displayAgent:string; labels:Record<string,string>; tokens:Record<string,string|null> }): Promise<void> { if(!this.config.metadata)return; await this.send("pane.report_metadata", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq:this.next(), title:data.title, display_agent:data.displayAgent, state_labels:data.labels, tokens:data.tokens }, "metadata"); }
+  /** Schema clear flags withdraw fields; null token patches withdraw the individual values. */
+  async clearMetadata(): Promise<void> { if(!this.config.metadata)return; await this.send("pane.report_metadata", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq:this.next(), clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens:Object.fromEntries(OWNED_METADATA_TOKENS.map((token)=>[token,null])) }, "metadata-clear", true); }
+  async notify(title:string, body:string, error=false): Promise<void> { if(!this.config.notifications)return; await this.send("notification.show", { title, body, sound:error ? "request":"done" }, "notification"); }
+  /** Release is priority queued so an already saturated observer queue cannot strand owned state. */
+  async release(): Promise<void> { await this.send("pane.release_agent", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, agent:"pi", seq:this.next() }, "release", true); }
+  async close(timeoutMs?:number): Promise<void> { this.closed=true; await this.transport.close(timeoutMs); }
+  private next(){ this.sequence = Math.min(Number.MAX_SAFE_INTEGER, this.sequence + 1); return this.sequence; }
+  /** Exactly two attempts share the configured connection/response timeout budget. */
+  private async send(method: HerdrMethod, params: Record<string,unknown>, key:string, priority=false): Promise<void> {
+    if(this.closed)return;
+    const revision=(this.keyRevisions.get(key)??0)+1;
+    this.keyRevisions.set(key,revision);
+    const id=`${LIFECYCLE_SOURCE}:${++this.requestNumber}`;
+    const line=encodeHerdrRequest({id,method,params});
+    const firstTimeout=Math.floor(this.config.timeoutMs/2);
+    const retryTimeout=this.config.timeoutMs-firstTimeout;
+    try { const response=await this.transport.request(line,key,priority,firstTimeout); decodeHerdrResponse(response,id); }
+    catch (error) {
+      // A stale failure must not enqueue a retry that replaces a newer keyed write.
+      if(this.closed || this.keyRevisions.get(key)!==revision || (error instanceof PresenceTransportError && /^Socket queue (coalesced|displaced|closed|is full)/.test(error.message)))return;
+      try { decodeHerdrResponse(await this.transport.request(line,key,priority,retryTimeout),id); } catch { /* output-only best effort */ }
     }
   }
 }
