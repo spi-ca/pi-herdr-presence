@@ -2,6 +2,8 @@
 
 `pi-herdr-presence`는 `pi-subagent`를 dependency로 import하거나 실행/취소 authority를 갖지 않습니다. 같은 Pi process event bus에 [generic event contract](event-contract.md)를 발행하는 경우에만 정확한 `source.id: "pi-subagent"`를 cumulative terminal producer로 처리합니다.
 
+정확한 `pi-subagent` aggregate만 parent pane의 고정 표시를 보강합니다. active/queued count는 `Pi · N running · M queued`, cancelling summary는 `Subagents are stopping`, aggregate failure는 `Subagent needs attention`처럼 bounded static/count-only 문구로 렌더하며 producer label, agent/task ID, path 또는 원문을 복사하지 않습니다. local error·input-needed·active parent 상태가 aggregate 표현보다 우선합니다.
+
 consumer는 producer의 generation/sequence fence를 따릅니다. companion summary는 source가 정확히 `pi-subagent`인 이미 수락된 같은 `(generation, sequence)` `update`에 한 번만 붙을 수 있고 update/remove fence와 tombstone을 공유합니다. 따라서 older/lower generation, same-sequence replay, remove 뒤 stale summary는 수락하지 않으며, newer update는 이전 summary를 withdraw하고 같은 새 sequence companion을 기다립니다. generation 변경, 수락된 remove 또는 cumulative count 감소는 retained baseline과 pending terminal aggregate를 폐기합니다. 같은 generation의 terminal burst는 최초 event 기준 success 450ms/error 100ms deadline을 사용하며 뒤 event가 deadline을 sliding시키지 않습니다. producer payload의 label, task text, prompt, tool output은 Herdr notification text로 복사되지 않습니다.
 
 discovery/replay로 retain한 snapshot과 새 session·새 generation·수락된 remove 뒤 initial baseline은 `attention: "none"`이다. 이는 actual first live terminal transition이 아니다. baseline 뒤 첫 live terminal transition은 `success` 또는 `error` attention일 수 있으며, 최초라는 이유만으로 `none`으로 낮추면 안 된다. `completed`, `failed`, `cancelled`는 generation 안에서 exact monotonic cumulative count다. producer의 bounded dedupe memory 또는 consumer의 bounded registry 때문에 count를 조용히 동결하거나 근사값으로 바꾸면 안 되며, count reset은 generation bump로만 한다.
