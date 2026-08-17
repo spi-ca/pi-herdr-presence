@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "sessionId": "summary-session",
+  "generation": 7,
+  "sequence": 9,
+  "source": { "id": "pi-subagent" },
+  "active": [
+    {
+      "id": "run-1",
+      "agent": "worker",
+      "status": "running",
+      "category": "active",
+      "startedAt": 1
+    },
+    {
+      "id": "run-2",
+      "agent": "worker",
+      "status": "cancelling",
+      "category": "cancelling",
+      "startedAt": 2
+    }
+  ],
+  "waiting": { "category": "queued", "count": 3 },
+  "terminal": {
+    "id": "run-0",
+    "agent": "worker",
+    "status": "failed",
+    "completedAt": 3
+  },
+  "omitted": 4
+}

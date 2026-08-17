@@ -16,7 +16,7 @@ export interface SubagentSummary {
   sessionId: string;
   generation: number;
   sequence: number;
-  source: { id: string };
+  source: { id: "pi-subagent" };
   active: Array<{ id: string; agent: string; status: "running" | "cancelling"; category: "active" | "cancelling"; startedAt: number }>;
   waiting?: { category: "queued" | "cancelling"; count: number };
   terminal?: { id: string; agent: string; status: "completed" | "failed" | "cancelled"; completedAt: number };
@@ -70,7 +70,7 @@ export function parseSubagentSummary(value: unknown): SubagentSummary | null {
     if (!root || root.version !== 1 || !text(root.sessionId) || !generation(root.generation) || !sequence(root.sequence) || !count(root.omitted)) return null;
     const source = snapshotOwnDataFields(root.source, SOURCE_KEYS, SOURCE_KEYS);
     const active = snapshotDenseArray(root.active, MAX_ACTIVE);
-    if (!source || !text(source.id) || !active) return null;
+    if (!source || source.id !== "pi-subagent" || !active) return null;
     const parsedActive: SubagentSummary["active"] = [];
     for (const rawItem of active) {
       const item = snapshotOwnDataFields(rawItem, ACTIVE_KEYS, ACTIVE_KEYS);

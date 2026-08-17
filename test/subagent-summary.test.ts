@@ -2,16 +2,20 @@ import { expect, test } from "bun:test";
 import { parseSubagentSummary, SubagentSummaryFence } from "../src/subagent-summary.js";
 import { metadata } from "../src/presentation.js";
 
-const canonicalSummary = {
-  version: 1 as const, sessionId: "summary-session", generation: 7, sequence: 9, source: { id: "pi-subagent" },
-  active: [
-    { id: "run-1", agent: "worker", status: "running" as const, category: "active" as const, startedAt: 1 },
-    { id: "run-2", agent: "worker", status: "cancelling" as const, category: "cancelling" as const, startedAt: 2 },
-  ],
-  waiting: { category: "queued" as const, count: 3 },
-  terminal: { id: "run-0", agent: "worker", status: "failed" as const, completedAt: 3 },
-  omitted: 4,
+type CanonicalSummary = {
+  version: 1;
+  sessionId: string;
+  generation: number;
+  sequence: number;
+  source: { id: "pi-subagent" };
+  active: Array<{ id: string; agent: string; status: "running" | "cancelling"; category: "active" | "cancelling"; startedAt: number }>;
+  waiting: { category: "queued" | "cancelling"; count: number };
+  terminal: { id: string; agent: string; status: "completed" | "failed" | "cancelled"; completedAt: number };
+  omitted: number;
 };
+
+const canonicalSummary: CanonicalSummary = await Bun.file(new URL("./fixtures/presence-summary-v1.json", import.meta.url)).json();
+const wrongSourceSummary = { ...canonicalSummary, source: { id: "other-subagent" } };
 const invalidCanonicalSummaries: unknown[] = [
   { ...canonicalSummary, unexpected: true },
   { ...canonicalSummary, active: [{ ...canonicalSummary.active[0], status: "waiting" }] },
@@ -28,6 +32,7 @@ const invalidCanonicalSummaries: unknown[] = [
 
 test("strict subagent summary parses the canonical companion fixtures", () => {
   expect(parseSubagentSummary(canonicalSummary)).toEqual(canonicalSummary);
+  expect(parseSubagentSummary(wrongSourceSummary)).toBeNull();
   expect(parseSubagentSummary({ ...canonicalSummary, terminal: { ...canonicalSummary.terminal, completedAt: Number.MAX_SAFE_INTEGER } })?.terminal?.completedAt).toBe(Number.MAX_SAFE_INTEGER);
   for (const invalid of invalidCanonicalSummaries) expect(parseSubagentSummary(invalid)).toBeNull();
   expect(parseSubagentSummary({ ...canonicalSummary, active: Array.from({ length: 9 }, () => canonicalSummary.active[0]) })).toBeNull();
