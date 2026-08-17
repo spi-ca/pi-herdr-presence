@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- exact `pi-subagent` aggregate의 parent pane을 bounded count/static wording으로 보강하고 local error·input-needed·active parent precedence를 유지합니다.
+- retained `interaction`/`waiting` presence는 attention과 관계없이 static input-needed blocked presentation으로 렌더하고, 각 open lifecycle의 첫 effective live `info`만 `request` notification sound로 알립니다. silent replay 자체와 best-effort 알림 시도 뒤 native/generic 중복은 재시도하지 않으며 producer text를 전달하지 않습니다.
 - `pi-presence:summary:v1` companion strict parser와 bounded subagent metadata token을 추가했습니다. terminal은 configured final clear 기간만 보존하며 raw task/output/error/path/socket/target 정보를 전달하지 않습니다.
 - severity 기반 TTL/LRU(64) notification dedupe, blocked/ask-user transition 알림, unref long-running timer를 추가했습니다. Herdr에는 allowlist된 `sound`만 보냅니다.
 - command, skill, prompt, LLM-callable tool을 등록하지 않아 모델의 기본 context를 확장하지 않습니다.

@@ -28,6 +28,8 @@ boolean은 `1/true/yes/on`, `0/false/no/off`만 인정합니다. 정수는 ASCII
 | `all` | 알림 | 알림 | 알림 | 알림 |
 | `disabled` | 없음 | 없음 | 없음 | 없음 |
 
+retained `source.kind === "interaction" && state === "waiting"` update는 attention 값과 관계없이 사용자 입력이 필요한 pane state입니다. 각 open input lifecycle에서 처음 effective해진 live `attention === "info"` request만 `request` sound 알림을 만들 수 있습니다. replay/update의 `attention:"none"` 자체는 pane을 `blocked`와 static `Pi needs your input` 메시지로 복원할 뿐 알림을 만들지 않지만, 그 lifecycle에 아직 알림을 전달하지 않았다면 이후 첫 live `info`가 한 번 알릴 수 있습니다. best-effort 알림 시도 뒤 높은 sequence나 native/generic 중복 신호는 재시도하지 않습니다. producer label/prompt/content는 복사하지 않습니다. error와 native local-blocked 상태는 input-needed 문구와 알림보다 우선하며, 아직 알림을 시도하지 않은 live request는 그 우선 상태가 해제되어 effective해질 때 한 번 알릴 수 있습니다. 모든 retained generic/native input 신호가 해제되면 다음 lifecycle을 다시 알릴 수 있습니다. interaction이 아닌 `waiting`+`info`는 일반 `working` 상태와 generic `done` notification을 유지합니다.
+
 `notification.show`는 dispatch 뒤 timeout·EOF에서 server가 이미 표시했는지 알 수 없으므로 한 번만 시도하고 재시도하지 않습니다. 일반 lifecycle/metadata 요청만 총 timeout을 최대 두 bounded attempt로 나눕니다.
 
 ## Herdr 대상과 trust boundary
