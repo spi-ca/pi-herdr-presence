@@ -3,6 +3,8 @@ import { hasControlOrBidi, isPlainObject } from "./validation.js";
 export const PI_PRESENCE_UPDATE_EVENT = "pi-presence:update:v1" as const;
 export const PI_PRESENCE_REMOVE_EVENT = "pi-presence:remove:v1" as const;
 export const PI_PRESENCE_READY_EVENT = "pi-presence:ready:v1" as const;
+/** Bounded companion wire for subagent aggregate summaries. */
+export const PI_PRESENCE_SUMMARY_EVENT = "pi-presence:summary:v1" as const;
 const MAX_TEXT = 96;
 const MAX_SOURCES = 64;
 /** Each count is a safe integer in the inclusive range 0..1,000,000. */

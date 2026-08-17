@@ -5,7 +5,7 @@ import { hasControlOrBidi } from "./validation.js";
 
 export interface HerdrIdentity { paneId: string; socketPath: string; }
 export interface SocketFingerprint { dev: number; ino: number; uid: number; }
-const safe = (value: string | undefined): value is string => !!value && value.length <= 256 && !hasControlOrBidi(value);
+const safe = (value: string | undefined): value is string => !!value && Buffer.byteLength(value, "utf8") <= 256 && !hasControlOrBidi(value);
 
 /** Herdr itself supplies all three values; Linux/macOS Unix sockets only. */
 export function readHerdrIdentity(env: NodeJS.ProcessEnv = process.env, platform = process.platform): HerdrIdentity | null {
@@ -16,7 +16,11 @@ export function readHerdrIdentity(env: NodeJS.ProcessEnv = process.env, platform
   return { paneId, socketPath };
 }
 function uid(): number | null { return typeof process.getuid === "function" ? process.getuid() : null; }
-function safeDirectory(name: string, entry: Stats, currentUid: number): void { if (!entry.isDirectory()) throw new Error("Socket ancestor is not a directory."); if (entry.uid !== 0 && entry.uid !== currentUid) throw new Error("Socket ancestor owner is unsafe."); const stickyTmp = (name === "/tmp" || name === "/private/tmp") && entry.uid === 0 && (entry.mode & 0o1000) !== 0; if (!stickyTmp && (entry.mode & 0o022) !== 0) throw new Error("Socket ancestor is replaceable."); }
-async function directories(parent: string, currentUid: number): Promise<void> { let current = path.resolve(parent); for (;;) { const entry = await fs.lstat(current); if (entry.isSymbolicLink()) throw new Error("Socket path contains a symlink ancestor."); safeDirectory(current, entry, currentUid); const next = path.dirname(current); if (next === current) return; current = next; } }
-/** Unix transport validates owner-only socket and its full non-replaceable path on every connection. */
-export async function safeSocketFingerprint(candidate: string): Promise<SocketFingerprint> { if (!path.isAbsolute(candidate) || candidate.includes("\0")) throw new Error("Socket path is invalid."); const currentUid = uid(); if (currentUid === null) throw new Error("Current UID is unavailable."); const entry = await fs.lstat(candidate); if (!entry.isSocket() || entry.uid !== currentUid || (entry.mode & 0o077) !== 0) throw new Error("Socket is not owner-only for the current UID."); await directories(path.dirname(candidate), currentUid); return { dev: entry.dev, ino: entry.ino, uid: entry.uid }; }
+function trustedStickyTmp(name: string, entry: Stats): boolean { return (name === "/tmp" || name === "/private/tmp") && entry.uid === 0 && (entry.mode & 0o1000) !== 0; }
+function safeDirectory(name: string, entry: Stats, currentUid: number): void { if (!entry.isDirectory()) throw new Error("Socket ancestor is not a directory."); if (trustedStickyTmp(name, entry)) return; if (entry.uid !== 0 && entry.uid !== currentUid) throw new Error("Socket ancestor owner is unsafe."); if ((entry.mode & 0o022) !== 0) throw new Error("Socket ancestor is replaceable."); }
+/** Validate the exact lexical traversal; root-owned aliases such as macOS /tmp are resolved separately. */
+async function lexicalDirectories(parent: string, currentUid: number): Promise<void> { const components = parent.split(path.sep).filter(Boolean); let current = path.parse(parent).root; safeDirectory(current, await fs.lstat(current), currentUid); for (const component of components) { current = path.join(current, component); const entry = await fs.lstat(current); if (entry.isSymbolicLink()) { if (entry.uid !== 0) throw new Error("Socket path contains an untrusted symlink ancestor."); continue; } safeDirectory(current, entry, currentUid); } }
+/** Validate every actual ancestor after aliases have been resolved. */
+async function resolvedDirectories(parent: string, currentUid: number): Promise<void> { for (let current = parent;;) { safeDirectory(current, await fs.lstat(current), currentUid); const next = path.dirname(current); if (next === current) return; current = next; } }
+/** Unix transport validates owner-only socket and its complete lexical and resolved non-replaceable path on every connection. */
+export async function safeSocketFingerprint(candidate: string): Promise<SocketFingerprint> { if (!path.isAbsolute(candidate) || candidate.includes("\0") || path.resolve(candidate) !== candidate) throw new Error("Socket path is invalid or contains ambiguous traversal."); const currentUid = uid(); if (currentUid === null) throw new Error("Current UID is unavailable."); const parent = path.dirname(candidate); await lexicalDirectories(parent, currentUid); const entry = await fs.lstat(candidate); if (!entry.isSocket() || entry.uid !== currentUid || (entry.mode & 0o077) !== 0) throw new Error("Socket is not owner-only for the current UID."); await resolvedDirectories(await fs.realpath(parent), currentUid); return { dev: entry.dev, ino: entry.ino, uid: entry.uid }; }
