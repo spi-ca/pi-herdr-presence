@@ -7,16 +7,16 @@ import { resolvePresenceConfig } from "../src/config.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const update = (sequence: number) => ({ version: 1 as const, sessionId: "session", generation: 1, sequence, source: { id: "pi-subagent", label: "Subagents", kind: "aggregate" }, state: "running" as const, counts: { active: 1, completed: 0, failed: 0 } });
-const summary = (sequence: number) => ({ version: 1 as const, sessionId: "session", generation: 1, sequence, source: { id: "pi-subagent" }, active: [{ id: "opaque", agent: "worker", status: "running" as const, category: "active" as const, startedAt: 1 }], terminal: { id: "opaque", agent: "worker", status: "completed" as const, completedAt: 2 }, omitted: 0 });
+const update = (sequence: number, generation = 1) => ({ version: 1 as const, sessionId: "session", generation, sequence, source: { id: "pi-subagent", label: "Subagents", kind: "aggregate" }, state: "running" as const, counts: { active: 1, completed: 0, failed: 0 } });
+const summary = (sequence: number, generation = 1) => ({ version: 1 as const, sessionId: "session", generation, sequence, source: { id: "pi-subagent" }, active: [{ id: "opaque", agent: "worker", status: "running" as const, category: "active" as const, startedAt: 1 }], terminal: { id: "opaque", agent: "worker", status: "completed" as const, completedAt: 2 }, omitted: 0 });
 
-async function withRuntime(run: (runtime: PresenceRuntime, lines: string[]) => Promise<void>) {
+async function withRuntime(run: (runtime: PresenceRuntime, lines: string[]) => Promise<void>, finalClearMs = 20) {
   const dir = await fs.mkdtemp(join(os.tmpdir(), "herdr-summary-")); const socket = join(dir, "socket"); const lines: string[] = [];
   const server = await fakeSocket(socket, (line) => { lines.push(line); return JSON.stringify({ id: JSON.parse(line).id, result: {} }); });
   const keys = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"]; const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
     Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(dir, "missing") });
-    const runtime = new PresenceRuntime({ getAllTools() { return []; }, events: { emit() {} } } as never, { ...resolvePresenceConfig(), finalClearMs: 20 });
+    const runtime = new PresenceRuntime({ getAllTools() { return []; }, events: { emit() {} } } as never, { ...resolvePresenceConfig(), finalClearMs });
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
     await run(runtime, lines);
     await runtime.shutdownSession();
@@ -68,6 +68,41 @@ test("summary terminal expiry registry refreshes LRU recency without extending d
   expect(internal.summaryTerminalExpiry.get(firstKey)).toBe(firstDeadline);
   expect([...internal.summaryTerminalExpiry.keys()].some((key) => key.startsWith("terminal-1\u0000"))).toBe(false);
   await runtime.shutdownSession();
+});
+
+test("accepted remove gives the same terminal identity a fresh retention window", async () => {
+  await withRuntime(async (runtime) => {
+    const internal = runtime as unknown as { summaryTerminalExpiry: Map<string, number> };
+    runtime.handlePresenceUpdate(update(1));
+    runtime.handleSubagentSummary(summary(1));
+    const identity = [...internal.summaryTerminalExpiry.keys()][0]!;
+    expect(internal.summaryTerminalExpiry.get(identity)).toBeDefined();
+    runtime.handlePresenceRemove({ version: 1, sessionId: "session", generation: 1, sequence: 2, source: { id: "pi-subagent" } });
+    expect(internal.summaryTerminalExpiry.size).toBe(0);
+    const renewedAt = Date.now();
+    runtime.handlePresenceUpdate(update(3));
+    runtime.handleSubagentSummary(summary(3));
+    const renewedDeadline = internal.summaryTerminalExpiry.get(identity);
+    expect(renewedDeadline).toBeGreaterThanOrEqual(renewedAt + 60_000);
+    expect(renewedDeadline).toBeLessThanOrEqual(Date.now() + 60_000);
+  }, 60_000);
+});
+
+test("accepted generation change gives the same terminal identity a fresh retention window", async () => {
+  await withRuntime(async (runtime) => {
+    const internal = runtime as unknown as { summaryTerminalExpiry: Map<string, number> };
+    runtime.handlePresenceUpdate(update(1));
+    runtime.handleSubagentSummary(summary(1));
+    const identity = [...internal.summaryTerminalExpiry.keys()][0]!;
+    expect(internal.summaryTerminalExpiry.get(identity)).toBeDefined();
+    runtime.handlePresenceUpdate(update(1, 2));
+    expect(internal.summaryTerminalExpiry.size).toBe(0);
+    const renewedAt = Date.now();
+    runtime.handleSubagentSummary(summary(1, 2));
+    const renewedDeadline = internal.summaryTerminalExpiry.get(identity);
+    expect(renewedDeadline).toBeGreaterThanOrEqual(renewedAt + 60_000);
+    expect(renewedDeadline).toBeLessThanOrEqual(Date.now() + 60_000);
+  }, 60_000);
 });
 
 test("summary companion is one-shot and a terminal identity has a fixed expiry", async () => {
