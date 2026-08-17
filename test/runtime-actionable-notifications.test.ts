@@ -90,3 +90,36 @@ test("advanced external policy coalesces bursts and rearms only after a semantic
     expect(notices(lines)).toHaveLength(2);
   });
 });
+
+test("default policy records suppressed external success before a later error", async () => {
+  await withRuntime({}, async (runtime, lines) => {
+    runtime.handlePresenceUpdate(update("rearm", 1, "error", "error"));
+    await pause();
+    runtime.handlePresenceUpdate(update("rearm", 2, "success", "success"));
+    runtime.handlePresenceUpdate(update("rearm", 3, "error", "error"));
+    await pause();
+    expect(notices(lines).map((request) => request.params.title)).toEqual(["Pi needs attention", "Pi needs attention"]);
+  });
+});
+
+test("session rate limit survives remove and generation churn while reserving first actionables", async () => {
+  await withRuntime({}, async (runtime) => {
+    const titles: string[] = [];
+    (runtime as unknown as { client: unknown }).client = {
+      report: () => Promise.resolve(),
+      metadata: () => Promise.resolve(),
+      notify: (title: string) => { titles.push(title); return Promise.resolve(); },
+      teardown: () => Promise.resolve(),
+    };
+    for (let generation = 1; generation <= 10; generation++) {
+      runtime.handlePresenceUpdate({ ...update("input", 1, "info"), generation, source: { id: "input", label: "private prompt", kind: "interaction" }, state: "waiting" as const, counts: { active: 0, completed: 0, failed: 0 } });
+      runtime.handlePresenceUpdate({ ...update("input", 2, "none"), generation, source: { id: "input", label: "private prompt", kind: "interaction" }, state: "waiting" as const, counts: { active: 0, completed: 0, failed: 0 } });
+      runtime.handlePresenceRemove({ version: 1, sessionId: "session", generation, sequence: 3, source: { id: "input" } });
+    }
+    runtime.handlePresenceUpdate(update("error-after-churn", 1, "error", "error"));
+    await pause();
+    runtime.handleBlocked({ active: true, label: "private native block" });
+    expect(titles.filter((title) => title === "Pi needs your input")).toHaveLength(9);
+    expect(titles.filter((title) => title === "Pi needs attention")).toHaveLength(2);
+  });
+});

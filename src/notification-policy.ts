@@ -4,6 +4,7 @@ export const PI_SUBAGENT_SOURCE_ID = "pi-subagent";
 export type NotificationPolicy = "errors" | "background" | "settled" | "all" | "disabled";
 export type AttentionKind = "success" | "error";
 export type NotificationSeverity = "error" | "attention" | "success" | "info" | "long-running";
+export type NotificationCooldownKind = "error" | "input" | "blocked" | "other";
 export interface SubagentTerminalBaseline { readonly generation:number; readonly completed:number; readonly failed:number; readonly cancelled:number; }
 export interface SubagentObservation { readonly baseline:SubagentTerminalBaseline; readonly terminal:AttentionKind|null; readonly completedDelta:number; readonly failedDelta:number; readonly reset:boolean; readonly generationChanged:boolean; readonly unknownCount:boolean; }
 const baseline=(e:PresenceUpdate):SubagentTerminalBaseline=>({generation:e.generation,completed:e.counts.completed,failed:e.counts.failed,cancelled:e.counts.cancelled??0});
@@ -18,8 +19,18 @@ export class NotificationDeduper {
  private readonly entries=new Map<string,number>();
  constructor(private readonly ttlMs=60_000,private readonly limit=64){}
  accept(key:string,now=Date.now()):boolean {for(const [candidate,expires] of this.entries){if(expires<=now)this.entries.delete(candidate);}const expires=this.entries.get(key);if(expires!==undefined){this.entries.delete(key);this.entries.set(key,expires);return false;}this.entries.set(key,now+this.ttlMs);while(this.entries.size>this.limit)this.entries.delete(this.entries.keys().next().value!);return true;}
+ canAccept(key:string,now=Date.now()):boolean {for(const [candidate,expires] of this.entries){if(expires<=now)this.entries.delete(candidate);}return !this.entries.has(key);}
  get size(){return this.entries.size;}
  clear(){this.entries.clear();}
+}
+/** Fixed-window session backstop. First actionable kinds bypass exhaustion, but never reset it. */
+export class NotificationRateLimiter {
+ private timestamps:number[]=[];
+ private readonly actionable=new Set<Exclude<NotificationCooldownKind,"other">>();
+ constructor(private readonly windowMs=60_000,private readonly limit=8){}
+ accept(kind:NotificationCooldownKind,now=Date.now()):boolean {this.timestamps=this.timestamps.filter(timestamp=>timestamp+this.windowMs>now);if(kind!=="other"&&!this.actionable.has(kind)){this.actionable.add(kind);return true;}if(this.timestamps.length>=this.limit)return false;this.timestamps.push(now);return true;}
+ get size(){return this.timestamps.length;}
+ clear(){this.timestamps=[];this.actionable.clear();}
 }
 /** Bounded per-source semantic fence; higher sequences alone never make a new alert. */
 export class ExternalAttentionTransitions {
