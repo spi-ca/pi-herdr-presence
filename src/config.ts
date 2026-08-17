@@ -20,7 +20,7 @@ const SETTINGS = {
   timeoutMs: { type: "integer", env: "PI_HERDR_PRESENCE_TIMEOUT_MS", defaultValue: 1_000, min: 100, max: 30_000 },
   maxQueue: { type: "integer", env: "PI_HERDR_PRESENCE_MAX_QUEUE", defaultValue: 16, min: 1, max: 128 },
   notifications: { type: "boolean", env: "PI_HERDR_PRESENCE_NOTIFICATIONS", defaultValue: true },
-  notificationPolicy: { type: "enum", env: "PI_HERDR_PRESENCE_NOTIFY_POLICY", defaultValue: "background", values: ["errors", "background", "settled", "all", "disabled"] },
+  notificationPolicy: { type: "enum", env: "PI_HERDR_PRESENCE_NOTIFY_POLICY", defaultValue: "errors", values: ["errors", "background", "settled", "all", "disabled"] },
   metadata: { type: "boolean", env: "PI_HERDR_PRESENCE_METADATA", defaultValue: true },
   finalClearMs: { type: "integer", env: "PI_HERDR_PRESENCE_FINAL_CLEAR_MS", defaultValue: 1_500, min: 0, max: 60_000 },
   maxLabelChars: { type: "integer", env: "PI_HERDR_PRESENCE_MAX_LABEL_CHARS", defaultValue: 96, min: 16, max: 256 },

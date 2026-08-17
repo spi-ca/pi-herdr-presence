@@ -21,3 +21,18 @@ export class NotificationDeduper {
  get size(){return this.entries.size;}
  clear(){this.entries.clear();}
 }
+/** Bounded per-source semantic fence; higher sequences alone never make a new alert. */
+export class ExternalAttentionTransitions {
+ private readonly entries=new Map<string,{generation:number;attention:Exclude<PresenceUpdate["attention"],"none">}>();
+ constructor(private readonly limit=64){}
+ accept(sourceId:string,generation:number,attention:PresenceUpdate["attention"]):boolean {
+  if(attention!=="error"&&attention!=="success"&&attention!=="info"){this.entries.delete(sourceId);return false;}
+  const previous=this.entries.get(sourceId);
+  if(previous?.generation===generation&&previous.attention===attention)return false;
+  this.entries.delete(sourceId);this.entries.set(sourceId,{generation,attention});
+  while(this.entries.size>this.limit)this.entries.delete(this.entries.keys().next().value!);
+  return true;
+ }
+ remove(sourceId:string){this.entries.delete(sourceId);}
+ clear(){this.entries.clear();}
+}

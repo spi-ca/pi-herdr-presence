@@ -42,7 +42,8 @@ Herdr-managed `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`가 있으�
 - `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, 선택 `notification.show`를 보냅니다.
 - local Pi lifecycle, `herdr:blocked`, retained `pi-presence:update:v1` producer 상태를 `working`/`blocked`/`idle` composite state로 렌더합니다. native blocked counter는 root TUI session에서만 처리합니다.
 - 소켓·응답·protocol validation·JSON serialization·queue 오류는 observer 출력만 잃으며 Pi lifecycle을 실패시키지 않습니다. 일반 lifecycle/metadata 요청은 최대 두 번 시도하며, 두 시도의 연결/응답 timeout은 `PI_HERDR_PRESENCE_TIMEOUT_MS`를 반씩 사용합니다(기본 500ms + 500ms). 사용자에게 이미 보였는지 알 수 없는 `notification.show`와 teardown의 clear/release는 각각 한 번만 시도하며 재시도하지 않습니다.
-- `pi-subagent`는 import하지 않는 generic producer이며 source generation/sequence fence와 고정 terminal coalescing window로 처리합니다. 선택 summary companion은 task/output/path를 복사하지 않는 bounded pane metadata만 만듭니다.
+- 기본 알림은 actionable-only입니다. 오류, 새 input-needed lifecycle, 새 native/general blocked 전환만 알리고 start/progress/30초 long-running/replay/보통 성공 완료는 pane state·metadata만 갱신합니다. 기존의 더 넓은 알림은 명시적 `PI_HERDR_PRESENCE_NOTIFY_POLICY` 고급 설정으로만 켤 수 있습니다.
+- `pi-subagent`는 import하지 않는 generic producer이며 source generation/sequence fence와 고정 terminal coalescing window로 처리합니다. external attention은 semantic transition LRU와 짧은 timer coalescing으로 burst를 하나의 static 알림으로 제한합니다. 선택 summary companion은 task/output/path를 복사하지 않는 bounded pane metadata만 만듭니다.
 - command, skill, prompt, LLM-callable tool은 등록하지 않습니다.
 
 ## 문서와 검증

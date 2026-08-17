@@ -8,11 +8,11 @@
 | `PI_HERDR_PRESENCE_TIMEOUT_MS` | `1000` | 두 번의 요청에 나누어 적용하는 총 연결/응답 timeout (100–30000) |
 | `PI_HERDR_PRESENCE_MAX_QUEUE` | `16` | latest-write-wins 대기 항목 (1–128) |
 | `PI_HERDR_PRESENCE_NOTIFICATIONS` | `true` | `notification.show` 전역 kill switch |
-| `PI_HERDR_PRESENCE_NOTIFY_POLICY` | `background` | `errors`, `background`, `settled`, `all`, `disabled` |
+| `PI_HERDR_PRESENCE_NOTIFY_POLICY` | `errors` | `errors`, `background`, `settled`, `all`, `disabled` |
 | `PI_HERDR_PRESENCE_METADATA` | `true` | `pane.report_metadata` 보고 |
 | `PI_HERDR_PRESENCE_FINAL_CLEAR_MS` | `1500` | terminal rerender 지연 (0–60000) |
 | `PI_HERDR_PRESENCE_MAX_LABEL_CHARS` | `96` | UI label code-point 상한 (16–256) |
-| `PI_HERDR_PRESENCE_LONG_RUNNING_MS` | `30000` | local long-running 알림 임계값 (1000–300000) |
+| `PI_HERDR_PRESENCE_LONG_RUNNING_MS` | `30000` | `background`/`all` policy에서만 쓰는 local long-running 알림 임계값 (1000–300000) |
 
 boolean은 `1/true/yes/on`, `0/false/no/off`만 인정합니다. 정수는 ASCII 양의 정수와 표 범위를 만족해야 합니다.
 
@@ -22,13 +22,17 @@ boolean은 `1/true/yes/on`, `0/false/no/off`만 인정합니다. 정수는 ASCII
 
 | policy | error / 사용자 입력·blocked attention | local success | external success·info | local long-running |
 | --- | --- | --- | --- | --- |
-| `errors` | 알림 | 없음 | 없음 | 없음 |
-| `background` | 알림 | 없음 | 알림 | 알림 |
+| `errors` (기본) | 알림 | 없음 | 없음 | 없음 |
+| `background` (호환 고급 설정) | 알림 | 없음 | 알림 | 알림 |
 | `settled` | 알림 | 알림 | 없음 | 없음 |
 | `all` | 알림 | 알림 | 알림 | 알림 |
 | `disabled` | 없음 | 없음 | 없음 | 없음 |
 
+기본 `errors` 정책은 **오류, 새 사용자 입력 lifecycle, 새 native/general blocked 전환만** 알립니다. start, 보통 progress, 30초 long-running, replay, 보통 success completion은 pane state/metadata에만 남고 조용합니다. 이전의 외부 success·info/long-running 동작이 필요한 경우에만 명시적으로 `background`, `settled`, `all`을 선택합니다.
+
 retained `source.kind === "interaction" && state === "waiting"` update는 attention 값과 관계없이 사용자 입력이 필요한 pane state입니다. 각 open input lifecycle에서 처음 effective해진 live `attention === "info"` request만 `request` sound 알림을 만들 수 있습니다. replay/update의 `attention:"none"` 자체는 pane을 `blocked`와 static `Pi needs your input` 메시지로 복원할 뿐 알림을 만들지 않지만, 그 lifecycle에 아직 알림을 전달하지 않았다면 이후 첫 live `info`가 한 번 알릴 수 있습니다. best-effort 알림 시도 뒤 높은 sequence나 native/generic 중복 신호는 재시도하지 않습니다. producer label/prompt/content는 복사하지 않습니다. error와 native local-blocked 상태는 input-needed 문구와 알림보다 우선하며, 아직 알림을 시도하지 않은 live request는 그 우선 상태가 해제되어 effective해질 때 한 번 알릴 수 있습니다. 모든 retained generic/native input 신호가 해제되면 다음 lifecycle을 다시 알릴 수 있습니다. interaction이 아닌 `waiting`+`info`는 일반 `working` 상태와 generic `done` notification을 유지합니다.
+
+외부 producer의 알림 후보는 source/generation/attention의 의미 전환에서만 수락하며, 최대 64 source의 LRU fence와 짧은 timer coalescing window로 묶습니다. 같은 상태의 높은 sequence는 재알림하지 않고, 같은 burst에서는 error가 success/info보다 우선합니다. 이 처리는 event/socket/timer 기반이며 polling하지 않습니다.
 
 `notification.show`는 dispatch 뒤 timeout·EOF에서 server가 이미 표시했는지 알 수 없으므로 한 번만 시도하고 재시도하지 않습니다. 일반 lifecycle/metadata 요청만 총 timeout을 최대 두 bounded attempt로 나눕니다.
 

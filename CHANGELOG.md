@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 기본 notification policy를 actionable-only `errors`로 변경했습니다. 오류, 새 input-needed lifecycle, 새 native/general blocked 전환만 기본 알림이며 start/progress/long-running/replay/보통 성공 완료는 조용합니다. 기존의 더 넓은 policy 값은 명시적 고급 호환 설정으로 유지합니다.
+- external producer attention은 source/generation/attention semantic transition fence와 짧은 timer coalescing을 거칩니다. 같은 상태의 높은 sequence와 burst는 재알림하지 않고 error가 generic progress보다 우선합니다.
 - exact `pi-subagent` aggregate의 parent pane을 bounded count/static wording으로 보강하고 local error·input-needed·active parent precedence를 유지합니다.
 - retained `interaction`/`waiting` presence는 attention과 관계없이 static input-needed blocked presentation으로 렌더하고, 각 open lifecycle의 첫 effective live `info`만 `request` notification sound로 알립니다. silent replay 자체와 best-effort 알림 시도 뒤 native/generic 중복은 재시도하지 않으며 producer text를 전달하지 않습니다.
 - `pi-presence:summary:v1` companion strict parser와 bounded subagent metadata token을 추가했습니다. terminal은 configured final clear 기간만 보존하며 raw task/output/error/path/socket/target 정보를 전달하지 않습니다.
