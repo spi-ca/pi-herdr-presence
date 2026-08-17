@@ -64,7 +64,7 @@ function snapshotOwnDataFields(
   allowed: readonly string[],
   required: readonly string[],
 ): Record<string, unknown> | null {
-  if (!isPlainObject(value) || isProxy(value)) return null;
+  if (isProxy(value) || !isPlainObject(value)) return null;
   const keys = Reflect.ownKeys(value);
   if (!keys.every((key) => typeof key === "string" && allowed.includes(key))
     || !required.every((key) => keys.includes(key))) return null;
