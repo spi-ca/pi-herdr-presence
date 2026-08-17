@@ -12,7 +12,13 @@ pi install git:github.com/spi-ca/pi-herdr-presence
 pi install -l git:github.com/spi-ca/pi-herdr-presence
 ```
 
-코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 저장소 source로 합니다.
+로컬 checkout을 개발할 때는 저장소의 **absolute path**를 설치합니다.
+
+```bash
+pi install /absolute/path/to/pi-herdr-presence
+```
+
+코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 source로 합니다.
 
 ```bash
 pi remove git:github.com/spi-ca/pi-herdr-presence
@@ -29,14 +35,15 @@ Herdr-managed `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`가 있으�
 
 - session report와 state report는 `ctx.sessionManager.getSessionFile()`의 absolute path를 우선하고 session ID를 fallback으로 사용합니다. session ref는 매 `agent_start`에서 새로 고칩니다.
 - metadata는 `applies_to_source: "herdr:pi"`를 사용합니다.
-- teardown은 `clear_title`, `clear_display_agent`, `clear_state_labels`와 모든 owned token의 null patch를 보낸 뒤 같은 source/agent를 release합니다.
+- teardown은 `clear_title`, `clear_display_agent`, `clear_state_labels`와 15개 owned token(`active`…`context`, `subagents`, `subagent_wait`, `subagent_error`, `subagent_terminal`, `subagent_terminal_at`)의 null patch와 priority release를 각각 한 번씩, close와 함께 하나의 configured timeout budget 안에서 best-effort로 시도합니다. 만료 시 transport를 abort하고 이후 cleanup dispatch를 중단합니다.
 
 ## 동작
 
 - `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, 선택 `notification.show`를 보냅니다.
 - local Pi lifecycle, `herdr:blocked`, retained `pi-presence:update:v1` producer 상태를 `working`/`blocked`/`idle` composite state로 렌더합니다. native blocked counter는 root TUI session에서만 처리합니다.
-- 소켓 오류, timeout, 응답 오류, queue 포화는 observer 출력만 잃으며 Pi lifecycle을 실패시키지 않습니다. retry는 한 번뿐이며, 두 시도의 연결/응답 timeout은 `PI_HERDR_PRESENCE_TIMEOUT_MS`를 반씩 사용합니다(기본 500ms + 500ms). loop가 아닙니다.
-- `pi-subagent`는 import하지 않는 generic producer이며 source generation/sequence fence와 고정 terminal coalescing window로 처리합니다.
+- 소켓·응답·protocol validation·JSON serialization·queue 오류는 observer 출력만 잃으며 Pi lifecycle을 실패시키지 않습니다. 일반 lifecycle/metadata 요청은 최대 두 번 시도하며, 두 시도의 연결/응답 timeout은 `PI_HERDR_PRESENCE_TIMEOUT_MS`를 반씩 사용합니다(기본 500ms + 500ms). 사용자에게 이미 보였는지 알 수 없는 `notification.show`와 teardown의 clear/release는 각각 한 번만 시도하며 재시도하지 않습니다.
+- `pi-subagent`는 import하지 않는 generic producer이며 source generation/sequence fence와 고정 terminal coalescing window로 처리합니다. 선택 summary companion은 task/output/path를 복사하지 않는 bounded pane metadata만 만듭니다.
+- command, skill, prompt, LLM-callable tool은 등록하지 않습니다.
 
 ## 문서와 검증
 

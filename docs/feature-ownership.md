@@ -6,7 +6,7 @@
 | state/metadata/release | `herdr:pi` / `pi` | 설치 시 소유 | state publish만 |
 | external presence render | retained update/remove contract | 별도 구현 | state publish |
 | agent execution/cancel | 없음 | 없음 | producer 소유 |
-| teardown | true title/display/label clear와 10 metadata token null patch 후 `herdr:pi` release | own source | 없음 |
+| teardown | true title/display/label clear와 15개 metadata token—`active`, `completed`, `failed`, `queued`, `cancelled`, `total`, `progress`, `tokens`, `cost`, `context`, `subagents`, `subagent_wait`, `subagent_error`, `subagent_terminal`, `subagent_terminal_at`—null patch, priority `herdr:pi` release, close를 단일 deadline 안에서 best-effort 수행 | own source | 없음 |
 
 이 extension은 lifecycle authority를 분리하지 않습니다. native session report, state, metadata (`applies_to_source` 포함), clear, release 모두 `source: "herdr:pi"`, `agent: "pi"`입니다.
 
