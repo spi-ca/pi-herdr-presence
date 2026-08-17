@@ -38,7 +38,7 @@ boolean은 `1/true/yes/on`, `0/false/no/off`만 인정합니다. 정수는 ASCII
 
 Pane ID와 socket identity 입력은 최대 256 UTF-8 byte이고, session ID/path는 각각 최대 128/1024 UTF-8 byte입니다. session path가 destination 제한을 넘으면 유효한 ID로 fallback합니다. protocol text field와 16 KiB JSON payload도 UTF-8 byte로 검증하며, validation 또는 serialization 실패는 socket dispatch 없이 해당 observer 출력만 폐기합니다.
 
-`/herdr-presence-doctor`는 설정됨과 실제 ready를 구분하는 read-only 진단입니다. enabled 상태와 `HERDR_ENV`, pane/socket configured 여부는 boolean으로만 표시하고 env 값·socket 경로·pane ID는 출력하지 않습니다. identity/env, managed integration 상태, socket owner/path 안전성을 표시하고, 활성화되어 안전한 socket일 때만 allowlist된 `ping`, `pane.get`으로 pane binding을 확인합니다. `ping`은 exact `{type:"pong",protocol:19|20}`, `pane.get`은 canonical `{type:"pane_info",pane:{pane_id,...}}`의 bounded pane ID가 configured pane과 정확히 일치해야 합니다. `PI_HERDR_PRESENCE_ENABLED=false`여도 command는 진단을 위해 등록되지만 `disabled`와 `not ready`를 명확히 표시하고 socket/ping/pane probe는 모두 `not-run`입니다. managed integration이 `present` 또는 `unknown`이면 socket probe는 실행하지 않고 `socket safety: not-run`으로 표시합니다(`unsafe` 판정이 아님). report/focus/close/cleanup mutation을 수행하지 않습니다.
+이 확장은 command, skill, prompt, LLM-callable tool을 등록하지 않습니다. lifecycle hook과 same-process event-bus 구독만 사용하며 모델의 기본 context를 확장하지 않습니다.
 
 ## Managed integration과 state authority
 

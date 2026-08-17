@@ -2,7 +2,7 @@ import { hasControlOrBidi, isPlainObject } from "./validation.js";
 export class PresenceProtocolError extends Error {}
 /** Maximum JSON payload size; the transport accounts for the trailing LF separately. */
 export const HERDR_MAX_LINE_BYTES = 16 * 1024;
-export type HerdrMethod = "pane.report_agent" | "pane.report_agent_session" | "pane.report_metadata" | "pane.release_agent" | "notification.show" | "ping" | "pane.get";
+export type HerdrMethod = "pane.report_agent" | "pane.report_agent_session" | "pane.report_metadata" | "pane.release_agent" | "notification.show";
 export interface HerdrRequest { id: string; method: HerdrMethod; params: Record<string, unknown>; }
 export const LIFECYCLE_SOURCE = "herdr:pi";
 const state = new Set(["idle", "working", "blocked", "unknown"]);
@@ -13,8 +13,6 @@ function valid(request: HerdrRequest): boolean {
  const p = request.params; if (!safeText(request.id, 128) || !safeText(request.method, 64)) return false;
  const base = safeText(p.pane_id, 256) && safeText(p.source, 64);
  switch (request.method) {
- case "ping": return own(p,[],[]);
- case "pane.get": return own(p,["pane_id"],["pane_id"]) && safeText(p.pane_id,256);
  case "pane.report_agent": return base && own(p,["pane_id","source","agent","state","message","seq","agent_session_id","agent_session_path"],["pane_id","source","agent","state","seq"]) && p.source === LIFECYCLE_SOURCE && p.agent === "pi" && state.has(p.state as string) && Number.isSafeInteger(p.seq) && (p.seq as number) >= 0 && (p.message === undefined || p.message === null || safeText(p.message)) && sessionRef(p);
  case "pane.report_agent_session": return base && own(p,["pane_id","source","agent","seq","agent_session_id","agent_session_path","session_start_source"],["pane_id","source","agent","seq"]) && p.source === LIFECYCLE_SOURCE && p.agent === "pi" && Number.isSafeInteger(p.seq) && (p.seq as number) >= 0 && sessionRef(p) && (p.session_start_source === undefined || safeText(p.session_start_source));
  case "pane.report_metadata": {

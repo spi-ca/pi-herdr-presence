@@ -23,7 +23,6 @@ pi install -l git:github.com/spi-ca/pi-herdr-presence
 - `transport.ts`: request-per-connection NDJSON, timeout, bounded keyed queue와 abortable close
 - `protocol.ts`: UTF-8 byte-bounded Herdr request allowlist와 strict response envelope
 - `runtime.ts`: TUI/session epoch lifecycle, native `herdr:blocked`, retained composite state, summary tombstone, ready fencing, aggregate teardown
-- `doctor.ts`: read-only enabled/configuration, managed integration, socket/ping/pane readiness diagnosis
 - `subagent-summary.ts`: strict bounded `pi-subagent` summary parser and update/remove fence
 - `events.ts`: generic producer parser, generation/sequence fence, tombstone, bounded source slots
 - `presentation.ts`: safe state/message/metadata/notification renderer
@@ -33,6 +32,7 @@ pi install -l git:github.com/spi-ca/pi-herdr-presence
 - Linux/macOS Unix socket만 지원한다. Windows/named-pipe transport를 추가하지 않는다.
 - `HERDR_ENV=1`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` 외 target fallback을 만들지 않는다.
 - process/CLI/shell execution, polling, persistent connection 또는 subscription을 추가하지 않는다.
+- command, skill, prompt, LLM-callable tool을 등록하거나 모델의 기본 context를 확장하지 않는다.
 - raw prompt, response, tool argument/output, file path를 Herdr text에 넣지 않는다.
 - socket, protocol validation, serialization 실패는 observer output만 잃고 Pi lifecycle을 실패시키지 않는다.
 - lifecycle state, state-attached session ref, session report, metadata `applies_to_source`, release, clear는 모두 정확히 `source: herdr:pi`, `agent: pi`를 사용한다.

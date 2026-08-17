@@ -5,9 +5,6 @@ test("strictly encodes known Herdr methods and response envelopes",()=>{
  expect(encodeHerdrRequest(request)).toContain('"pane.report_agent"');
  expect(()=>encodeHerdrRequest({...request,params:{...request.params,state:"done"}})).toThrow();
  expect(encodeHerdrRequest({id:"s",method:"pane.report_agent_session",params:{pane_id:"p",source:"herdr:pi",agent:"pi",seq:1,agent_session_id:"session"}})).toContain('"source":"herdr:pi"');
- expect(encodeHerdrRequest({id:"ping",method:"ping",params:{}})).toContain('"method":"ping"');
- expect(encodeHerdrRequest({id:"get",method:"pane.get",params:{pane_id:"p"}})).toContain('"method":"pane.get"');
- expect(()=>encodeHerdrRequest({id:"bad",method:"ping",params:{priority:"high"}} as never)).toThrow();
  expect(()=>encodeHerdrRequest({id:"notice",method:"notification.show",params:{title:"Pi",body:"Done",sound:"done",priority:"high"}} as never)).toThrow();
  expect(()=>encodeHerdrRequest({id:"s",method:"pane.report_agent_session",params:{pane_id:"p",source:"other",agent:"pi",seq:1,agent_session_id:"session"}})).toThrow();
  expect(encodeHerdrRequest({id:"m",method:"pane.report_metadata",params:{pane_id:"p",source:"herdr:pi",applies_to_source:"herdr:pi",agent:"pi",seq:1,clear_title:true,clear_display_agent:true,clear_state_labels:true,tokens:{active:null}}})).toContain('"clear_title":true');
