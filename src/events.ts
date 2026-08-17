@@ -1,3 +1,4 @@
+import { isProxy } from "node:util/types";
 import { hasControlOrBidi, isPlainObject } from "./validation.js";
 
 export const PI_PRESENCE_UPDATE_EVENT = "pi-presence:update:v1" as const;
@@ -51,22 +52,19 @@ export interface PresenceRemoveResult {
   readonly removed?: PresenceUpdate;
 }
 
-function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.includes(key));
-}
 function hasOwn(value: Record<string, unknown>, key: string): boolean { return Object.hasOwn(value, key); }
 
 /**
- * Copies only own data properties after checking the complete key set. Ready
- * payloads are process-local but untrusted: this avoids getter/proxy races and
- * makes every later validation read a stable snapshot.
+ * Copies only own data properties after checking the complete key set. Event
+ * payloads are process-local but untrusted: this rejects accessors and proxies,
+ * and makes every later validation read a stable snapshot.
  */
 function snapshotOwnDataFields(
   value: unknown,
   allowed: readonly string[],
   required: readonly string[],
 ): Record<string, unknown> | null {
-  if (!isPlainObject(value)) return null;
+  if (!isPlainObject(value) || isProxy(value)) return null;
   const keys = Reflect.ownKeys(value);
   if (!keys.every((key) => typeof key === "string" && allowed.includes(key))
     || !required.every((key) => keys.includes(key))) return null;
@@ -129,17 +127,16 @@ function percent(value: unknown): value is number { return typeof value === "num
  */
 export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
   try {
-    if (!isPlainObject(value) || !hasOnlyKeys(value, ROOT_KEYS)) return null;
-    if (!hasOwn(value, "version") || !hasOwn(value, "sessionId") || !hasOwn(value, "generation") || !hasOwn(value, "sequence") || !hasOwn(value, "source") || !hasOwn(value, "state") || !hasOwn(value, "counts")) return null;
-    const version = value.version;
-    const sessionId = value.sessionId;
-    const eventGeneration = value.generation;
-    const eventSequence = value.sequence;
-    const rawSource = value.source;
-    const state = value.state;
-    const rawCounts = value.counts;
-    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !isPlainObject(rawSource) || !hasOnlyKeys(rawSource, SOURCE_KEYS) || !isPlainObject(rawCounts) || !hasOnlyKeys(rawCounts, COUNT_KEYS)) return null;
-    if (!SOURCE_KEYS.every((key) => hasOwn(rawSource, key)) || !REQUIRED_COUNT_KEYS.every((key) => hasOwn(rawCounts, key))) return null;
+    const root = snapshotOwnDataFields(value, ROOT_KEYS, ["version", "sessionId", "generation", "sequence", "source", "state", "counts"]);
+    if (!root) return null;
+    const version = root.version;
+    const sessionId = root.sessionId;
+    const eventGeneration = root.generation;
+    const eventSequence = root.sequence;
+    const rawSource = snapshotOwnDataFields(root.source, SOURCE_KEYS, SOURCE_KEYS);
+    const state = root.state;
+    const rawCounts = snapshotOwnDataFields(root.counts, COUNT_KEYS, REQUIRED_COUNT_KEYS);
+    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !rawSource || !rawCounts) return null;
     const sourceId = rawSource.id;
     const sourceLabel = rawSource.label;
     const sourceKind = rawSource.kind;
@@ -152,9 +149,9 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
     if (!safeText(sourceId) || !safeText(sourceLabel) || !safeText(sourceKind) || typeof state !== "string" || !STATES.has(state) || !count(active) || !count(completed) || !count(failed) || (queued !== undefined && !count(queued)) || (cancelled !== undefined && !count(cancelled)) || (total !== undefined && !count(total))) return null;
 
     let progress: PresenceUpdate["progress"];
-    if (value.progress !== undefined) {
-      const rawProgress = value.progress;
-      if (!isPlainObject(rawProgress) || !hasOnlyKeys(rawProgress, PROGRESS_KEYS) || !hasOwn(rawProgress, "value")) return null;
+    if (root.progress !== undefined) {
+      const rawProgress = snapshotOwnDataFields(root.progress, PROGRESS_KEYS, ["value"]);
+      if (!rawProgress) return null;
       const progressValue = rawProgress.value;
       const progressLabel = rawProgress.label;
       if (!metric(progressValue) || progressValue > 1 || (progressLabel !== undefined && !safeText(progressLabel))) return null;
@@ -162,9 +159,9 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
     }
 
     let usage: PresenceUsage | undefined;
-    if (value.usage !== undefined) {
-      const rawUsage = value.usage;
-      if (!isPlainObject(rawUsage) || !hasOnlyKeys(rawUsage, USAGE_KEYS)) return null;
+    if (root.usage !== undefined) {
+      const rawUsage = snapshotOwnDataFields(root.usage, USAGE_KEYS, []);
+      if (!rawUsage) return null;
       const tokens = rawUsage.tokens;
       const cost = rawUsage.cost;
       const contextPercent = rawUsage.contextPercent;
@@ -176,7 +173,7 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
       };
     }
 
-    const attention = value.attention;
+    const attention = root.attention;
     if (attention !== undefined && (typeof attention !== "string" || !ATTENTION.has(attention))) return null;
     return {
       version: 1, sessionId, generation: eventGeneration, sequence: eventSequence,
@@ -195,15 +192,14 @@ export function parsePresenceUpdate(value: unknown): PresenceUpdate | null {
 /** Parse a withdrawal envelope without permitting producer-controlled display data. */
 export function parsePresenceRemove(value: unknown): PresenceRemove | null {
   try {
-    if (!isPlainObject(value) || !hasOnlyKeys(value, REMOVE_ROOT_KEYS)) return null;
-    if (!hasOwn(value, "version") || !hasOwn(value, "sessionId") || !hasOwn(value, "generation") || !hasOwn(value, "sequence") || !hasOwn(value, "source")) return null;
-    const version = value.version;
-    const sessionId = value.sessionId;
-    const eventGeneration = value.generation;
-    const eventSequence = value.sequence;
-    const rawSource = value.source;
-    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence)
-      || !isPlainObject(rawSource) || !hasOnlyKeys(rawSource, REMOVE_SOURCE_KEYS) || !hasOwn(rawSource, "id")) return null;
+    const root = snapshotOwnDataFields(value, REMOVE_ROOT_KEYS, REMOVE_ROOT_KEYS);
+    if (!root) return null;
+    const version = root.version;
+    const sessionId = root.sessionId;
+    const eventGeneration = root.generation;
+    const eventSequence = root.sequence;
+    const rawSource = snapshotOwnDataFields(root.source, REMOVE_SOURCE_KEYS, REMOVE_SOURCE_KEYS);
+    if (version !== 1 || !safeText(sessionId) || !generation(eventGeneration) || !sequence(eventSequence) || !rawSource) return null;
     const sourceId = rawSource.id;
     if (!safeText(sourceId)) return null;
     return {

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { join } from "node:path";
 import { resolvePresenceConfig } from "../src/config.js";
 import { PresenceRuntime } from "../src/runtime.js";
+import { PI_PRESENCE_READY_EVENT, PI_PRESENCE_REMOVE_EVENT, PI_PRESENCE_UPDATE_EVENT } from "../src/events.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
 const pause = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -119,6 +120,53 @@ test("same-state higher sequences do not re-alert, but exit and re-entry do", as
     await pause();
     expect(notifications(lines)).toHaveLength(2);
   });
+});
+
+test("a consumer-less ready request restores retained interaction state and a later remove releases it", async () => {
+  const dir = await fs.mkdtemp(join(os.tmpdir(), "herdr-ready-replay-"));
+  const socket = join(dir, "socket");
+  const lines: string[] = [];
+  const server = await fakeSocket(socket, (line) => {
+    lines.push(line);
+    return JSON.stringify({ id: JSON.parse(line).id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(dir, "missing") });
+    const listeners = new Map<string, Array<(payload: unknown) => void>>();
+    const pi = {
+      getAllTools() { return []; },
+      events: {
+        on(name: string, listener: (payload: unknown) => void) { const group = listeners.get(name) ?? []; group.push(listener); listeners.set(name, group); },
+        emit(name: string, payload: unknown) { for (const listener of listeners.get(name) ?? []) listener(payload); },
+      },
+    };
+    const runtime = new PresenceRuntime(pi as never, resolvePresenceConfig());
+    pi.events.on(PI_PRESENCE_UPDATE_EVENT, (payload) => runtime.handlePresenceUpdate(payload));
+    pi.events.on(PI_PRESENCE_REMOVE_EVENT, (payload) => runtime.handlePresenceRemove(payload));
+    pi.events.on(PI_PRESENCE_READY_EVENT, (payload) => runtime.handleReady(payload));
+    let replayed = false;
+    pi.events.on(PI_PRESENCE_READY_EVENT, (payload) => {
+      if ((payload as { sessionId?: unknown; consumer?: unknown }).sessionId === "session" && !("consumer" in (payload as object))) {
+        replayed = true;
+        pi.events.emit(PI_PRESENCE_UPDATE_EVENT, interaction(1, "none"));
+      }
+    });
+    await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
+    await pause();
+    expect(replayed).toBe(true);
+    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+    pi.events.emit(PI_PRESENCE_REMOVE_EVENT, remove("opaque-interaction", 2));
+    await pause();
+    expect(lastReport(lines).params).toMatchObject({ state: "idle", message: "Pi is idle" });
+    await runtime.shutdownSession();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("silent replay alerts once on the first live input and rearms only after release", async () => {
