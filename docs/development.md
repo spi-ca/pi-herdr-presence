@@ -7,6 +7,8 @@ bun install
 bun run ci
 ```
 
+`ci`는 warning을 오류로 처리하는 Biome lint, 타입 검사, 테스트를 순서대로 실행합니다.
+
 GitHub 설치는 다음 명령을 사용합니다.
 
 ```bash

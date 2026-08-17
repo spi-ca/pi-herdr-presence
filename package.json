@@ -13,7 +13,7 @@
   "scripts": {
     "test": "bun test --pass-with-no-tests",
     "check": "bunx tsc --noEmit",
-    "lint": "biome lint .",
+    "lint": "biome lint --error-on-warnings .",
     "ci": "bun run lint && bun run check && bun run test"
   },
   "license": "MIT",
