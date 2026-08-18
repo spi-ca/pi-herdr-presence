@@ -1,82 +1,1007 @@
-import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createPresenceConsumer, createPresenceProducer, encodeTerminalBatch, MAX_INTEGER, type PresenceConsumerHandle, type PresenceEventV2, type PresenceProducerHandle, type PresenceStateInputV2, type PresenceStateV2, type PresenceTerminalV2, type TerminalBatch } from "@pi/presence";
 import { PresenceClient, type SessionRef } from "./client.js";
 import type { PresenceConfig } from "./config.js";
-import { PI_PRESENCE_READY_EVENT, PI_PRESENCE_UPDATE_EVENT, parsePresenceReady, parsePresenceRemove, parsePresenceSessionId, parsePresenceUpdate, PresenceEventRegistry, type PresenceUpdate } from "./events.js";
 import { readHerdrIdentity } from "./identity.js";
-import { ExternalAttentionTransitions, NotificationDeduper, NotificationRateLimiter, PI_SUBAGENT_SOURCE_ID, observeSubagentTerminal, shouldNotify, shouldNotifyAttention, type NotificationCooldownKind, type NotificationSeverity, type SubagentTerminalBaseline } from "./notification-policy.js";
+import { ExternalAttentionTransitions, NotificationDeduper, NotificationRateLimiter, shouldNotify, type NotificationCooldownKind, type NotificationSeverity } from "./notification-policy.js";
 import { officialHookStatus } from "./official-hook.js";
-import { attentionText, blockedPresentationCategory, compositeState, isInteractionWaiting, isLiveInputRequest, metadata, safeMessage, type BlockedCategory } from "./presentation.js";
-import { parseSubagentSummary, SubagentSummaryFence, type SubagentSummary } from "./subagent-summary.js";
+import { processCoordinator } from "./process-coordinator.js";
+import { attentionText, compositeState, isInteractionWaiting, isLiveInputRequest, metadata, presentation, safeMessage } from "./presentation.js";
 import { HerdrSocketTransport } from "./transport.js";
 import { TodoProgressAdapter } from "./todo.js";
 import { UsageTracker } from "./usage.js";
 import { hasControlOrBidi } from "./validation.js";
-const LOCAL={id:"pi",label:"Pi",kind:"agent"}; const TODO="pi-todo"; const MAX_BLOCKED_COUNT=1_000_000; const MAX_BLOCKED_TRANSITIONS=Number.MAX_SAFE_INTEGER; const MAX_SUMMARY_TERMINALS=64; const EXTERNAL_NOTIFICATION_COALESCE_MS=50;
-type ContextUsageProvider={getContextUsage?:()=>unknown;sessionManager?:{getSessionId?:()=>unknown;getSessionFile?:()=>unknown}};
-type Terminal="success"|"error"|"cancelled";
-type RuntimeSession={id:string;ref:SessionRef};
-function session(context:unknown):RuntimeSession|null { try { const manager=(context as ContextUsageProvider | undefined)?.sessionManager; const id=parsePresenceSessionId(manager?.getSessionId?.()); if(!id)return null; const file=manager?.getSessionFile?.(); if(typeof file==="string"&&file.length>0&&Buffer.byteLength(file,"utf8")<=1024&&!hasControlOrBidi(file)&&path.isAbsolute(file))return {id,ref:{agent_session_path:file}}; if(Buffer.byteLength(id,"utf8")>128)return null; return {id,ref:{agent_session_id:id}}; } catch{return null;} }
+
+const MAX_NOTIFICATION_TRANSITIONS = Number.MAX_SAFE_INTEGER;
+const MAX_TERMINALS = 3;
+/** Unmodified Herdr accepts at most an 80-byte UTF-8 terminal token value. */
+const HERDR_TERMINAL_VALUE_MAX_BYTES = 80;
+const MAX_TERMINAL_OVERFLOW = 1_000_000;
+const MAX_TERMINAL_TOMBSTONES = 64;
+const MAX_FAILURE_PAIRS = 64;
+/** Detached startup retains only these derived lifecycle edges, never source payloads. */
+const MAX_PENDING_LIFECYCLE_EDGES = 64;
+const MAX_DERIVED_USAGE = 1_000_000;
+/** A bounded synchronous producer terminal/state pair has no reason to outlive one tick. */
+const FAILURE_PAIR_WINDOW_MS = 10;
+const EXTERNAL_NOTIFICATION_COALESCE_MS = 50;
+type SessionManagerProvider = { getSessionId?: () => unknown };
+type ContextUsageProvider = { getContextUsage?: () => unknown; isIdle?: () => boolean; sessionManager?: SessionManagerProvider };
+type Terminal = "success" | "error" | "cancelled";
+type LocalSource = "pi" | "todo";
+type FailureArrival = { source: string; generation: number; kind: "state" | "terminal"; expiresAt: number; timer?: ReturnType<typeof setTimeout>; notify?: () => void };
+type RuntimeSession = { id: string; ref: SessionRef; manager: SessionManagerProvider };
+type DerivedUsage = { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: number };
+type DerivedTodo = Pick<PresenceStateInputV2, "state" | "progress">;
+type PendingLifecycleEdge =
+  | { kind: "agent_start" }
+  | { kind: "turn_start"; contextPercent?: number }
+  | { kind: "agent_end"; terminal?: Terminal }
+  | { kind: "agent_settled" }
+  | { kind: "message_end"; usage: DerivedUsage }
+  | { kind: "tool_result"; failed: boolean; todo?: DerivedTodo };
+type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean };
+
+function sessionManager(context: unknown): SessionManagerProvider | null {
+  try {
+    const manager = (context as ContextUsageProvider | undefined)?.sessionManager;
+    return typeof manager === "object" && manager !== null ? manager : null;
+  } catch { return null; }
+}
+function session(context: unknown): RuntimeSession | null {
+  try {
+    const manager = sessionManager(context);
+    if (!manager) return null;
+    const id = manager.getSessionId?.();
+    if (typeof id !== "string" || id.length === 0 || Buffer.byteLength(id, "utf8") > 128 || hasControlOrBidi(id)) return null;
+    return { id, ref: { agent_session_id: id }, manager };
+  } catch { return null; }
+}
+function derivedNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(MAX_DERIVED_USAGE, value) : undefined; }
+function deriveUsage(event: unknown): DerivedUsage | undefined {
+  const message = (event as { message?: { role?: unknown; usage?: unknown } })?.message;
+  if (message?.role !== "assistant" || typeof message.usage !== "object" || message.usage === null) return undefined;
+  const usage = message.usage as { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; totalTokens?: unknown; cost?: unknown };
+  const cost = typeof usage.cost === "object" && usage.cost !== null ? (usage.cost as { total?: unknown }).total : usage.cost;
+  const derived: DerivedUsage = {};
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) {
+    const value = derivedNumber(usage[key]);
+    if (value !== undefined) derived[key] = value;
+  }
+  const safeCost = derivedNumber(cost);
+  if (safeCost !== undefined) derived.cost = safeCost;
+  return derived;
+}
+function deriveContextPercent(context: ContextUsageProvider): number | undefined {
+  try {
+    const usage = context.getContextUsage?.();
+    if (typeof usage !== "object" || usage === null) return undefined;
+    const candidate = usage as { contextPercent?: unknown; percent?: unknown };
+    const value = candidate.contextPercent ?? candidate.percent;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100 ? value : undefined;
+  } catch { return undefined; }
+}
+
 /** The last terminal message wins: an automatic retry can legitimately recover an earlier failure. */
-export function deriveTerminalState(event:unknown, toolFailed=false):Terminal { const messages=(event as {messages?:unknown})?.messages; if(!Array.isArray(messages))return toolFailed?"error":"success"; for(let i=messages.length-1;i>=0;i--){const reason=(messages[i] as {stopReason?:unknown})?.stopReason;if(reason==="aborted"||reason==="cancelled")return "cancelled";if(reason==="error")return "error";if(typeof reason==="string")return "success";}return toolFailed?"error":"success"; }
+export function deriveTerminalState(event: unknown, toolFailed = false): Terminal {
+  return deriveExplicitTerminal(event) ?? (toolFailed ? "error" : "success");
+}
+
+/** An absent stop reason is resolved only by the current turn's tool reducer. */
+function deriveExplicitTerminal(event: unknown): Terminal | undefined {
+  const messages = (event as { messages?: unknown })?.messages;
+  if (!Array.isArray(messages)) return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const reason = (messages[index] as { stopReason?: unknown })?.stopReason;
+    if (reason === "aborted" || reason === "cancelled") return "cancelled";
+    if (reason === "error") return "error";
+    if (typeof reason === "string") return "success";
+  }
+  return undefined;
+}
+
 /** Session-epoch-fenced composite renderer. It consumes generic retained sources without importing producers. */
 export class PresenceRuntime {
- private registry=new PresenceEventRegistry(); private todo=new TodoProgressAdapter(); private client:PresenceClient|null=null; private sessionId:string|null=null; private sessionRef:SessionRef|null=null; private context:ContextUsageProvider|null=null; private epoch=0; private transitions:Promise<void>=Promise.resolve(); private generation=0; private sequence=0; private active=false; private rootSession=false; private blockedCount=0; private blockedTransitions=0; private nativeAskUserBlocked=false; private nativeGeneralBlocked=false; private inputLifecycleActive=false; private inputNotificationPending=false; private inputNotificationAttempted=false; private inputNotificationTransitions=0; private turn=0; private completed=0; private failed=0; private toolFailed=false; private terminal:Terminal="success"; private usage=new UsageTracker(); private ownReadyAdvertisement:object|null=null; private ownReadyRequest:object|null=null; private readyResponseInFlight=false; private clearTimer:ReturnType<typeof setTimeout>|undefined; private longRunningTimer:ReturnType<typeof setTimeout>|undefined; private subagentBaseline:SubagentTerminalBaseline|null=null; private subagentPending:{generation:number;sequence:number;attention:"success"|"error";completed:number;failed:number;unknownCount:boolean;successSuppressed:boolean;deadline:number;timer:ReturnType<typeof setTimeout>}|null=null; private subagentSummary:SubagentSummary|null=null; private summaryFence=new SubagentSummaryFence(); private summaryTerminalExpiry=new Map<string,number>(); private summaryTerminalTimer:ReturnType<typeof setTimeout>|undefined; private notifications=new NotificationDeduper(); private notificationRate=new NotificationRateLimiter(); private externalAttention=new ExternalAttentionTransitions(); private externalPending:{severity:"error"|"success"|"info";title:string;body:string;timer:ReturnType<typeof setTimeout>}|null=null; private externalNotificationSequence=0;
- constructor(private pi:ExtensionAPI,private config:PresenceConfig){}
- async startSession(context:unknown,event?:unknown){const epoch=++this.epoch;return this.transition(()=>this.beginSession(context,event,epoch));}
- private transition(work:()=>Promise<void>):Promise<void>{const next=this.transitions.then(work,work);this.transitions=next.catch(()=>{});return next;}
- private async beginSession(context:unknown,event:unknown,epoch:number){
-  await this.teardown(); if(epoch!==this.epoch)return;
-  if((context as {mode?:unknown})?.mode!=="tui")return;
-  const identity=readHerdrIdentity(); const current=session(context); if(!identity||!current)return;
-  let managed=true;try{managed=(await officialHookStatus())!=="absent";}catch{managed=true;}
-  if(epoch!==this.epoch||managed)return;
-  const client=new PresenceClient(identity,new HerdrSocketTransport(identity.socketPath,this.config.timeoutMs,this.config.maxQueue),this.config);
-  this.client=client;this.sessionId=current.id;this.sessionRef=current.ref;this.context=context as ContextUsageProvider;this.generation++;this.sequence=0;this.registry.start(current.id);this.rootSession=true;this.active=false;this.blockedCount=0;this.blockedTransitions=0;this.nativeAskUserBlocked=false;this.nativeGeneralBlocked=false;this.inputLifecycleActive=false;this.inputNotificationPending=false;this.inputNotificationAttempted=false;this.inputNotificationTransitions=0;this.turn=0;this.completed=0;this.failed=0;this.toolFailed=false;this.terminal="success";this.usage=new UsageTracker();
-  await client.reportSession(current.ref,typeof (event as {reason?:unknown})?.reason==="string"?(event as {reason:string}).reason:undefined);
-  if(epoch!==this.epoch||this.client!==client)return;
-  this.ready(current.id);this.updateContextUsage();let reloadActive=false;try{reloadActive=(context as {isIdle?:()=>boolean}).isIdle?.()===false;}catch{}if(reloadActive){this.active=true;this.turn++;this.startLongRunningTimer();this.publish("running");}else this.publish("idle");
- }
- handlePresenceUpdate(payload:unknown){try{const e=parsePresenceUpdate(payload);if(!e||e.source.id===LOCAL.id||e.source.id===TODO||!this.registry.acceptParsed(e))return;if(e.source.id===PI_SUBAGENT_SOURCE_ID){this.summaryFence.recordUpdate(e);if(this.subagentSummary&&(this.subagentSummary.generation!==e.generation||this.subagentSummary.sequence!==e.sequence))this.clearSubagentSummary();this.queueSubagent(e);}else this.render(e);this.syncInputNotification();}catch{}}
- handlePresenceRemove(payload:unknown){try{const e=parsePresenceRemove(payload);if(!e||e.source.id===LOCAL.id||e.source.id===TODO)return;const accepted=this.registry.acceptParsedRemove(e).accepted;if(!accepted)return;this.externalAttention.remove(e.source.id);if(e.source.id===PI_SUBAGENT_SOURCE_ID){this.summaryFence.recordRemove(e);if(this.subagentPending)clearTimeout(this.subagentPending.timer);this.subagentPending=null;this.subagentBaseline=null;this.clearSubagentSummary();this.clearSummaryTerminalExpiry();}this.render();this.syncInputNotification();}catch{}}
- /** Strict companion summary hook; ids/tasks/output are never rendered or sent to Herdr. */
- handleSubagentSummary(payload:unknown){try{const next=parseSubagentSummary(payload);if(!next||next.sessionId!==this.sessionId||next.source.id!==PI_SUBAGENT_SOURCE_ID||!this.summaryFence.acceptSummary(next))return;this.subagentSummary=this.retainSummaryTerminal(next);this.render();}catch{}}
- /** Native same-process guardrail event: only the current root TUI session may affect it. */
- handleBlocked(payload:unknown){try{if(!this.rootSession||!payload||typeof payload!=="object")return;const data=payload as {active?:unknown;label?:unknown};if(typeof data.active!=="boolean")return;const wasBlocked=this.blockedCount>0;const wasGeneralBlocked=this.nativeGeneralBlocked;const askUser=data.label==="ask-user";if(data.active){this.blockedCount=Math.min(MAX_BLOCKED_COUNT,this.blockedCount+1);if(askUser)this.nativeAskUserBlocked=true;else this.nativeGeneralBlocked=true;}else{this.blockedCount=Math.max(0,this.blockedCount-1);if(this.blockedCount===0){this.nativeAskUserBlocked=false;this.nativeGeneralBlocked=false;}}const isBlocked=this.blockedCount>0;if(wasBlocked!==isBlocked)this.blockedTransitions=Math.min(MAX_BLOCKED_TRANSITIONS,this.blockedTransitions+1);this.render();this.syncInputNotification();if(data.active&&!askUser&&!wasGeneralBlocked){this.discardExternalProgress();this.notify("attention",`blocked:${this.turn}:${this.blockedTransitions}`,"Pi needs attention","Pi needs attention","local");}}catch{}}
- handleReady(payload:unknown){try{if(payload===this.ownReadyAdvertisement||payload===this.ownReadyRequest||this.readyResponseInFlight)return;const r=parsePresenceReady(payload);if(!r||r.sessionId!==this.sessionId||r.consumer)return;this.readyResponseInFlight=true;try{this.advertise(r.sessionId);for(const e of this.registry.snapshot().filter(x=>x.source.id===LOCAL.id||x.source.id===TODO))this.emit({...e,generation:this.generation,sequence:++this.sequence,attention:"none"});}finally{this.readyResponseInFlight=false;}}catch{}}
- handleAgentStart(context?:unknown){if(!this.rootSession||!this.sessionId)return;const refreshed=session(context);if(refreshed&&refreshed.id===this.sessionId)this.sessionRef=refreshed.ref;const client=this.client;const ref=this.sessionRef;const epoch=this.epoch;if(client&&ref)void client.reportSession(ref).then(()=>{if(epoch!==this.epoch||this.client!==client)return;}).catch(()=>{});this.clear();if(!this.active){this.active=true;this.turn++;this.terminal="success";this.toolFailed=false;this.usage=new UsageTracker();this.startLongRunningTimer();}this.updateContextUsage();this.publish("running");}
- handleTurnStart(context:unknown){if(context&&typeof context==="object")this.context=context as ContextUsageProvider;this.updateContextUsage();}
- handleAgentEnd(event:unknown){if(this.rootSession)this.terminal=deriveTerminalState(event,this.toolFailed);}
- handleAgentSettled(context:unknown){try{const idle=(context as {isIdle?:()=>boolean})?.isIdle;if(idle&&idle()===false)return;}catch{return;}if(!this.rootSession||!this.sessionId||!this.active)return;this.active=false;this.clearLongRunningTimer();this.updateContextUsage();if(this.terminal==="error")this.failed++;else if(this.terminal==="success")this.completed++;this.publish(this.terminal,this.terminal==="cancelled"?"none":this.terminal);const now=this.epoch;this.clearTimer=setTimeout(()=>{if(this.epoch===now&&!this.active)this.render();},this.config.finalClearMs);this.clearTimer.unref?.();}
- handleAgentEndFallback(){this.handleAgentSettled({});}
- handleMessageEnd(event:unknown){const m=(event as {message?:{role?:unknown;usage?:unknown}})?.message;if(m?.role==="assistant"){this.usage.add(m.usage);this.updateContextUsage();}}
- handleToolResult(event:unknown){if((event as {isError?:unknown})?.isError===true&&this.active)this.toolFailed=true;if(!this.rootSession||!this.sessionId)return;let todo:PresenceUpdate|null=null;try{todo=this.todo.accept(event,this.pi.getAllTools(),this.sessionId,this.generation,++this.sequence)}catch{}if(todo&&this.registry.acceptParsed(todo)){this.render(todo);this.syncInputNotification();this.emit(todo);}}
- async shutdownSession(){++this.epoch;return this.transition(()=>this.teardown());}
- private publish(state:PresenceUpdate["state"],attention:PresenceUpdate["attention"]="none"){if(!this.rootSession||!this.sessionId)return;const e:PresenceUpdate={version:1,sessionId:this.sessionId,generation:this.generation,sequence:++this.sequence,source:{...LOCAL},state,counts:{active:this.active?1:0,completed:this.completed,failed:this.failed},...(this.usage.snapshot()?{usage:this.usage.snapshot()}:{}),attention};if(this.registry.acceptParsed(e)){this.render(e);this.syncInputNotification();this.emit(e);}}
- private nativeBlockedCategory():BlockedCategory|undefined{return this.nativeGeneralBlocked?"blocked":this.nativeAskUserBlocked?"ask-user":undefined;}
- private effectiveBlockedCategory(events:readonly PresenceUpdate[]):BlockedCategory{return blockedPresentationCategory(events,this.nativeBlockedCategory());}
- /** One retained input lifecycle yields at most one alert; suppressed live intent remains pending. */
- private syncInputNotification(){const events=this.registry.snapshot();const inputPresent=this.nativeAskUserBlocked||events.some(isInteractionWaiting);if(!inputPresent){this.inputLifecycleActive=false;this.inputNotificationPending=false;this.inputNotificationAttempted=false;return;}if(!this.inputLifecycleActive)this.inputLifecycleActive=true;if(this.inputNotificationAttempted)return;if(this.nativeAskUserBlocked||events.some(isLiveInputRequest))this.inputNotificationPending=true;const effective=!this.nativeGeneralBlocked&&!events.some(e=>e.state==="error"||e.attention==="error");if(!effective||!this.inputNotificationPending)return;this.inputNotificationTransitions=Math.min(MAX_BLOCKED_TRANSITIONS,this.inputNotificationTransitions+1);this.discardExternalProgress();this.inputNotificationAttempted=this.notify("attention",`input:${this.turn}:${this.inputNotificationTransitions}`,"Pi needs your input","Pi needs your input","local");if(this.inputNotificationAttempted)this.inputNotificationPending=false;}
- private render(attention?:PresenceUpdate){const ref=this.sessionRef;const client=this.client;if(!this.rootSession||!ref||!client)return;const events=this.registry.snapshot();const state=compositeState(events,this.active,this.blockedCount>0);const category=this.effectiveBlockedCategory(events);void client.report(state,ref,safeMessage(state,this.config.maxLabelChars,category,events,this.subagentSummary,this.active));void client.metadata(metadata(events,state,this.config.maxLabelChars,this.subagentSummary,category,this.active));const text=attention&&attention.source.id!==PI_SUBAGENT_SOURCE_ID&&attentionText(attention,this.config.maxLabelChars);if(!attention||attention.source.id===PI_SUBAGENT_SOURCE_ID)return;const origin=attention.source.id===LOCAL.id?"local":"external";const externalTransition=origin==="external"&&this.externalAttention.accept(attention.source.id,attention.generation,attention.attention);if(!text||text.inputNeeded||!shouldNotifyAttention(this.config.notificationPolicy,this.config.notifications,attention.attention,origin))return;const severity=attention.attention==="error"?"error":attention.attention==="success"?"success":"info";if(origin==="external"){if(externalTransition)this.queueExternalAttention(severity,text.title,text.body);return;}if(severity==="error")this.discardExternalProgress();this.notify(severity,`${attention.source.id}:${attention.generation}:${attention.sequence}:${this.turn}:${attention.attention}`,text.title,text.body,"local");}
- private queueSubagent(event:PresenceUpdate){const observed=observeSubagentTerminal(this.subagentBaseline,event);this.subagentBaseline=observed.baseline;if(observed.reset||observed.generationChanged){if(this.subagentPending)clearTimeout(this.subagentPending.timer);this.subagentPending=null;}if(observed.generationChanged)this.clearSummaryTerminalExpiry();this.render();if(!observed.terminal)return;const prior=this.subagentPending;if(prior&&prior.generation===event.generation){const becameError=prior.attention!=="error"&&observed.terminal==="error";prior.attention=observed.terminal==="error"?"error":prior.attention;prior.completed+=observed.completedDelta;prior.failed+=observed.failedDelta;prior.unknownCount||=observed.unknownCount;prior.successSuppressed||=observed.terminal==="success"&&this.active;prior.sequence=event.sequence;if(becameError){clearTimeout(prior.timer);prior.deadline=Date.now()+100;prior.timer=this.scheduleSubagent(prior);}return;}if(prior)clearTimeout(prior.timer);const pending={generation:event.generation,sequence:event.sequence,attention:observed.terminal,completed:observed.completedDelta,failed:observed.failedDelta,unknownCount:observed.unknownCount,successSuppressed:observed.terminal==="success"&&this.active,deadline:Date.now()+(observed.terminal==="error"?100:450),timer:undefined as unknown as ReturnType<typeof setTimeout>};pending.timer=this.scheduleSubagent(pending);this.subagentPending=pending;}
- private scheduleSubagent(pending:{generation:number;sequence:number;attention:"success"|"error";completed:number;failed:number;unknownCount:boolean;successSuppressed:boolean;deadline:number;timer:ReturnType<typeof setTimeout>}){const epoch=this.epoch;const timer=setTimeout(()=>{if(this.epoch!==epoch||this.subagentPending!==pending)return;this.subagentPending=null;const event:PresenceUpdate={version:1,sessionId:this.sessionId??"",generation:pending.generation,sequence:pending.sequence,source:{id:PI_SUBAGENT_SOURCE_ID,label:"Subagents",kind:"aggregate"},state:pending.attention==="error"?"error":"success",counts:{active:0,completed:pending.completed,failed:pending.failed},attention:pending.attention};this.render(event);if(pending.attention==="error")this.notifySubagentTerminal(pending);else if(!pending.successSuppressed)this.notifySubagentTerminal(pending);},Math.max(0,pending.deadline-Date.now()));timer.unref?.();return timer;}
- private notifySubagentTerminal(pending:{generation:number;sequence:number;attention:"success"|"error";completed:number;failed:number;unknownCount:boolean}){const count=(value:number,noun:string)=>`${value} subagent${value===1?"":"s"} ${noun}`;const mixed=pending.completed>0&&pending.failed>0;const failure=pending.attention==="error";const text=mixed?pending.unknownCount?"Subagents finished with failures":`${count(pending.completed,"finished")}; ${pending.failed} failed`:failure?pending.failed>0&&!pending.unknownCount?count(pending.failed,"failed"):"Subagents failed":pending.completed>0&&!pending.unknownCount?count(pending.completed,"finished"):"Subagents finished";const severity=failure?"error":"success";this.notify(severity,`subagent:${pending.generation}:${pending.sequence}:${severity}`,text,text,"external");}
- /** Event-bus bursts get one static alert; error replaces pending progress without delaying the first timer. */
- private queueExternalAttention(severity:"error"|"success"|"info",title:string,body:string){const pending=this.externalPending;if(pending){const priority={info:0,success:1,error:2};if(priority[severity]>priority[pending.severity]){pending.severity=severity;pending.title=title;pending.body=body;}return;}const next={severity,title,body,timer:undefined as unknown as ReturnType<typeof setTimeout>};next.timer=setTimeout(()=>{if(this.externalPending!==next)return;this.externalPending=null;this.notify(next.severity,`external:${++this.externalNotificationSequence}:${next.severity}`,next.title,next.body,"external");},EXTERNAL_NOTIFICATION_COALESCE_MS);next.timer.unref?.();this.externalPending=next;}
- private discardExternalProgress(){const pending=this.externalPending;if(!pending||pending.severity==="error")return;clearTimeout(pending.timer);this.externalPending=null;}
- private clearExternalAttention(){if(this.externalPending)clearTimeout(this.externalPending.timer);this.externalPending=null;this.externalAttention.clear();}
- private notificationCooldownKind(severity:NotificationSeverity,key:string):NotificationCooldownKind{return severity==="error"?"error":key.startsWith("input:")?"input":key.startsWith("blocked:")?"blocked":"other";}
- private notify(severity:NotificationSeverity,key:string,title:string,body:string,origin:"local"|"external"):boolean{if(!shouldNotify(this.config.notificationPolicy,this.config.notifications,severity,origin))return false;if(!this.notifications.canAccept(key)){this.notifications.accept(key);return false;}if(!this.notificationRate.accept(this.notificationCooldownKind(severity,key)))return false;this.notifications.accept(key);void this.client?.notify(title,body,severity==="error"||severity==="attention");return true;}
- private summaryTerminalIdentity(summary:SubagentSummary):string|undefined{const terminal=summary.terminal;return terminal?`${terminal.id}\u0000${terminal.status}\u0000${terminal.completedAt}`:undefined;}
- private retainSummaryTerminal(summary:SubagentSummary):SubagentSummary{if(this.summaryTerminalTimer)clearTimeout(this.summaryTerminalTimer);this.summaryTerminalTimer=undefined;const identity=this.summaryTerminalIdentity(summary);if(!identity)return summary;const now=Date.now();let deadline=this.summaryTerminalExpiry.get(identity);if(deadline===undefined){deadline=now+this.config.finalClearMs;}else{this.summaryTerminalExpiry.delete(identity);}this.summaryTerminalExpiry.set(identity,deadline);while(this.summaryTerminalExpiry.size>MAX_SUMMARY_TERMINALS)this.summaryTerminalExpiry.delete(this.summaryTerminalExpiry.keys().next().value!);if(deadline<=now)return {...summary,terminal:undefined};this.summaryTerminalTimer=setTimeout(()=>{if(this.summaryTerminalIdentity(this.subagentSummary??summary)!==identity)return;this.subagentSummary={...(this.subagentSummary??summary),terminal:undefined};this.render();},deadline-now);this.summaryTerminalTimer.unref?.();return summary;}
- private clearSubagentSummary(){if(this.summaryTerminalTimer)clearTimeout(this.summaryTerminalTimer);this.summaryTerminalTimer=undefined;this.subagentSummary=null;}
- private clearSummaryTerminalExpiry(){this.summaryTerminalExpiry.clear();}
- private startLongRunningTimer(){this.clearLongRunningTimer();const epoch=this.epoch;const turn=this.turn;this.longRunningTimer=setTimeout(()=>{this.longRunningTimer=undefined;if(this.epoch===epoch&&this.active&&this.turn===turn)this.notify("long-running",`long-running:${turn}`,"Pi is still working","A Pi task is taking longer than expected","local");},this.config.longRunningMs);this.longRunningTimer.unref?.();}
- private clearLongRunningTimer(){if(this.longRunningTimer)clearTimeout(this.longRunningTimer);this.longRunningTimer=undefined;}
- private ready(id:string){this.advertise(id);const request=Object.freeze({version:1 as const,sessionId:id});try{this.ownReadyRequest=request;this.pi.events.emit(PI_PRESENCE_READY_EVENT,request);}catch{}finally{this.ownReadyRequest=null;}}
- private advertise(id:string){const ad=Object.freeze({version:1 as const,sessionId:id,consumer:Object.freeze({id:"pi-herdr-presence",capabilities:Object.freeze(["presence-remove-v1","presence-summary-v1","herdr-pane-report-agent-v1","herdr-pane-report-metadata-v1"])})});try{this.ownReadyAdvertisement=ad;this.pi.events.emit(PI_PRESENCE_READY_EVENT,ad);}catch{}finally{this.ownReadyAdvertisement=null;}}
- private emit(e:PresenceUpdate){try{this.pi.events.emit(PI_PRESENCE_UPDATE_EVENT,e)}catch{}}
- private updateContextUsage(){try{this.usage.setContext(this.context?.getContextUsage?.());}catch{}}
- private clear(){if(this.clearTimer)clearTimeout(this.clearTimer);this.clearTimer=undefined;}
- private async teardown(){this.clear();this.clearLongRunningTimer();this.clearExternalAttention();if(this.subagentPending)clearTimeout(this.subagentPending.timer);this.subagentPending=null;this.subagentBaseline=null;this.clearSubagentSummary();this.summaryFence.reset();this.clearSummaryTerminalExpiry();this.notifications.clear();this.notificationRate.clear();this.readyResponseInFlight=false;this.ownReadyAdvertisement=null;this.ownReadyRequest=null;this.registry.stop();this.sessionId=null;this.sessionRef=null;this.context=null;this.active=false;this.rootSession=false;this.blockedCount=0;this.blockedTransitions=0;this.nativeAskUserBlocked=false;this.nativeGeneralBlocked=false;this.inputLifecycleActive=false;this.inputNotificationPending=false;this.inputNotificationAttempted=false;this.inputNotificationTransitions=0;const client=this.client;this.client=null;if(!client)return;await client.teardown(this.config.timeoutMs).catch(()=>{});}
+  private todo = new TodoProgressAdapter();
+  private client: PresenceClient | null = null;
+  /** Process-global ownership fences a stale cache-busted runtime's teardown. */
+  private authorityGeneration: number | null = null;
+  private consumer: PresenceConsumerHandle | null = null;
+  /** The exact opaque ready capability emitted by the active consumer. */
+  private consumerReady: PresenceConsumerHandle["ready"] | null = null;
+  private consumerActive = false;
+  /** Replay is retained state, not a live output edge, until session ownership settles. */
+  private outputReady = false;
+  private localPi: PresenceProducerHandle | null = null;
+  private localTodo: PresenceProducerHandle | null = null;
+  private localPiActive = false;
+  private localTodoActive = false;
+  /** Set while a max-ordinal source rotation requires fresh, rather than retained, snapshots. */
+  private rotationPending = false;
+  private lastPiState: PresenceStateInputV2 | null = null;
+  private lastTodoState: PresenceStateInputV2 | null = null;
+  private readonly states = new Map<PresenceStateV2["source"], PresenceStateV2>();
+  private terminalRecords: PresenceTerminalV2[] = [];
+  /** Fixed-TTL LRU fence for terminal identities across producer replacement. */
+  private readonly terminalTombstones = new Map<string, PresenceTerminalV2["outcome"]>();
+  private terminalOverflow = 0;
+  private sessionId: string | null = null;
+  private sessionRef: SessionRef | null = null;
+  private context: ContextUsageProvider | null = null;
+  /** Stable owner captured from session_start; Pi creates a fresh context wrapper per callback. */
+  private sessionManager: SessionManagerProvider | null = null;
+  /** Null synchronously fences ingress, output, and notifications during replacement/teardown. */
+  private ingressEpoch: number | null = null;
+  private epoch = 0;
+  /** The active owner must belong to the current epoch, not merely share an ID. */
+  private ownerEpoch = 0;
+  /** One startup can retain only one immediate lifecycle edge sequence. */
+  private pendingLifecycle: PendingLifecycle | null = null;
+  private transitions: Promise<void> = Promise.resolve();
+  /** At most one stale startup and one newest replacement can await a probe. */
+  private queuedStartup: { work: () => Promise<void>; resolve: () => void } | null = null;
+  private startupRunner: Promise<void> | null = null;
+  private generation = 0;
+  private sequence = 0;
+  private terminalEventId = 0;
+  private active = false;
+  private rootSession = false;
+  private inputLifecycleActive = false;
+  private inputNotificationPending = false;
+  private inputNotificationAttempted = false;
+  /** Coalesce only simultaneous input lifecycles; distinct terminal edges stay live. */
+  private inputNotificationTransitions = 0;
+  private turn = 0;
+  private toolFailed = false;
+  private terminal: Terminal = "success";
+  private usage = new UsageTracker();
+  /** Fixed TTL for the current bounded terminal batch; bursts never extend it. */
+  private terminalClearTimer: ReturnType<typeof setTimeout> | undefined;
+  private longRunningTimer: ReturnType<typeof setTimeout> | undefined;
+  private externalAttention = new ExternalAttentionTransitions();
+  private notifications = new NotificationDeduper();
+  private notificationRate = new NotificationRateLimiter();
+  private readonly failureArrivals: FailureArrival[] = [];
+  private externalPending: { severity: "error" | "success" | "info"; title: string; body: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  private externalNotificationSequence = 0;
+
+  constructor(private pi: ExtensionAPI, private config: PresenceConfig) {}
+
+  async startSession(context: unknown, event?: unknown) {
+    const epoch = ++this.epoch;
+    // A replacement must not leave the previous consumer able to accept same-tick ingress.
+    this.ingressEpoch = null;
+    const current = session(context);
+    this.pendingLifecycle = (context as { mode?: unknown })?.mode === "tui" && current
+      ? { epoch, id: current.id, manager: current.manager, context: context as ContextUsageProvider, edges: [], overflow: false }
+      : null;
+    return this.queueStartup(() => this.beginSession(context, event, epoch, current));
+  }
+
+  private transition(work: () => Promise<void>): Promise<void> {
+    const next = this.transitions.then(work, work);
+    this.transitions = next.catch(() => {});
+    return next;
+  }
+
+  /** Coalesce detached replacement starts so a hung probe retains only the latest epoch. */
+  private queueStartup(work: () => Promise<void>): Promise<void> {
+    return new Promise((resolve) => {
+      const replaced = this.queuedStartup;
+      this.queuedStartup = { work, resolve };
+      // Superseded callers have no ownership to await; their epoch is already fenced.
+      replaced?.resolve();
+      if (!this.startupRunner) {
+        this.startupRunner = this.drainStartups().finally(() => { this.startupRunner = null; });
+      }
+    });
+  }
+
+  private async drainStartups() {
+    while (this.queuedStartup) {
+      const startup = this.queuedStartup;
+      this.queuedStartup = null;
+      await processCoordinator.enqueueAuthority(() => this.transition(startup.work));
+      startup.resolve();
+    }
+  }
+
+  private async beginSession(context: unknown, event: unknown, epoch: number, current: RuntimeSession | null) {
+    await this.teardown();
+    if (epoch !== this.epoch) return;
+    if ((context as { mode?: unknown })?.mode !== "tui") { this.discardPendingLifecycle(epoch); return; }
+    const identity = readHerdrIdentity();
+    // Use the session_start snapshot, not a potentially mutated manager read
+    // after asynchronous authority probing.
+    if (!identity || !current) { this.discardPendingLifecycle(epoch); return; }
+    let managed = true;
+    try {
+      const official = await officialHookStatus();
+      // File absence cannot prove no already-loaded integration exists. Local
+      // authority therefore needs both the exact absence proof and operator opt-in.
+      managed = !this.config.soleReporter || official !== "absent";
+    } catch { managed = true; }
+    if (epoch !== this.epoch) return;
+    if (managed) { this.discardPendingLifecycle(epoch); return; }
+
+    const client = new PresenceClient(identity, new HerdrSocketTransport(identity.socketPath, this.config.timeoutMs, this.config.maxQueue), this.config);
+    const consumer = createPresenceConsumer({ id: "pi-herdr-presence" });
+    if (!consumer) { this.discardPendingLifecycle(epoch); return; }
+    // A consumer activation is the ownership acquisition point. Keep this
+    // unowned client local until activation succeeds so a failed contender
+    // cannot emit startup or teardown traffic for the pane.
+    this.consumer = consumer;
+    this.consumerReady = consumer.ready;
+    this.sessionId = current.id;
+    this.sessionRef = current.ref;
+    this.context = context as ContextUsageProvider;
+    // Ownership is the session_start manager identity plus its canonical ID,
+    // not the short-lived ExtensionContext wrapper supplied to each callback.
+    this.sessionManager = current.manager;
+    this.ownerEpoch = epoch;
+    this.generation = this.generation >= MAX_INTEGER ? 0 : this.generation + 1;
+    this.sequence = 0;
+    this.terminalEventId = 0;
+    this.states.clear();
+    this.terminalRecords = [];
+    this.terminalTombstones.clear();
+    this.terminalOverflow = 0;
+    this.rootSession = true;
+    this.active = false;
+    this.inputLifecycleActive = false;
+    this.inputNotificationPending = false;
+    this.inputNotificationAttempted = false;
+    this.inputNotificationTransitions = 0;
+    this.turn = 0;
+    this.toolFailed = false;
+    this.terminal = "success";
+    this.usage = new UsageTracker();
+    this.lastPiState = null;
+    this.lastTodoState = null;
+    this.clearFailureArrivals();
+
+    // Activation synchronously replays retained producer state. Open ingress only
+    // for this epoch before activation so replay reaches the reducer; a failed
+    // registration is immediately rolled back by teardown below.
+    this.ingressEpoch = epoch;
+    this.consumerActive = true;
+    let activated = false;
+    try {
+      activated = consumer.activate((name, ready) => { try { this.pi.events.emit(name, ready); } catch {} }) === true;
+    } catch { activated = false; }
+    if (!activated || epoch !== this.epoch || this.consumer !== consumer || this.consumerReady !== consumer.ready) {
+      this.teardownLocal();
+      this.discardPendingLifecycle(epoch);
+      return;
+    }
+    // Claim only after this lane has retired this runtime's prior authority and
+    // activation succeeded. A later stale teardown sees a different generation
+    // and closes locally without sending pane cleanup for this new owner.
+    this.authorityGeneration = processCoordinator.claimAuthority();
+    this.client = client;
+    try {
+      // Remove stale current and legacy ownership before restoring this
+      // session's authority. Cleanup is bounded, non-retried, and observer-only.
+      await client.prepareSessionAuthority();
+      if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+      await client.reportSession(current.ref, typeof (event as { reason?: unknown })?.reason === "string" ? (event as { reason: string }).reason : undefined);
+    } catch {
+      // Lifecycle output is observer-only; buffered retained state still gets
+      // one quiet render after bounded cleanup and session attempts settle.
+    }
+    if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+
+    this.outputReady = true;
+    // Retained replay only reconstructs state. Complete the initial pane
+    // projection before any live notification can enter the socket queue.
+    await this.renderCurrent();
+    if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+    // Retained terminals get their normal bounded metadata lifetime, but never a toast.
+    this.scheduleTerminalClear();
+    // Consumer activation may synchronously replay retained V2 state. It is
+    // projected above, but never promoted into a visible notification.
+    this.activateLocalCandidates();
+    this.updateContextUsage();
+    const pending = this.pendingLifecycle?.epoch === epoch && this.pendingLifecycle.id === current.id && this.pendingLifecycle.manager === current.manager ? this.pendingLifecycle : null;
+    this.discardPendingLifecycle(epoch);
+    if (pending) {
+      this.replayPendingLifecycle(pending);
+      if (!pending.overflow && pending.edges.some(edge => edge.kind === "agent_start")) return;
+    }
+    let reloadActive = false;
+    try { reloadActive = (context as { isIdle?: () => boolean }).isIdle?.() === false; } catch {}
+    if (reloadActive) {
+      this.active = true;
+      this.turn += 1;
+      this.startLongRunningTimer();
+      this.publish("running");
+    } else this.publish("idle");
+  }
+
+  /** All V2 ingress passes through the shared consumer; no local parser or reducer is authoritative. */
+  handlePresenceEvent(name: unknown, payload: unknown) {
+    try {
+      const accepted = this.isIngressOpen() && this.consumerActive ? this.consumer?.accept(name, payload) : undefined;
+      if (accepted) this.accept(accepted);
+    } catch {}
+  }
+
+  /** Ready is an opaque capability: structurally valid clones are deliberately not receipts. */
+  handleConsumerReady(payload: unknown) {
+    if (!this.isIngressOpen() || !this.rootSession || !this.consumerActive || !this.consumer || !this.consumerReady || payload !== this.consumerReady || this.consumer.ready !== this.consumerReady) return;
+    this.activateLocalCandidates();
+  }
+
+  private accept(event: PresenceEventV2) {
+    if ("state" in event) {
+      // A neutral state is a same-source semantic exit: a later external
+      // failure or block must be allowed to create a fresh attention edge.
+      if (!event.attention) this.externalAttention.remove(event.source);
+      this.states.set(event.source, event);
+      // Retained activation replay is state reconstruction, never an alert.
+      if (!this.outputReady) return;
+      this.render(event);
+      this.syncInputNotification(isLiveInputRequest(event));
+      return;
+    }
+    if ("eventId" in event) {
+      if (!this.recordTerminal(event, this.outputReady)) return;
+      // A terminal replay can populate the fixed token batch but never toast.
+      if (!this.outputReady) return;
+      this.dispatchTerminal(event);
+      return;
+    }
+    this.states.delete(event.source);
+    this.externalAttention.remove(event.source);
+    if (!this.outputReady) return;
+    this.render();
+    this.syncInputNotification();
+  }
+
+  /**
+   * ExtensionContext is a per-event wrapper. Accept only wrappers that expose
+   * the session_start manager and its canonical ID in the current runtime epoch.
+   */
+  private activeSessionFence(context: unknown): { epoch: number; context: ContextUsageProvider } | undefined {
+    const current = session(context);
+    if (!this.isIngressOpen() || !this.rootSession || this.ownerEpoch !== this.epoch || current === null || current.manager !== this.sessionManager || current.id !== this.sessionId) return undefined;
+    return { epoch: this.epoch, context: context as ContextUsageProvider };
+  }
+  private pendingSession(context: unknown): PendingLifecycle | undefined {
+    const current = session(context);
+    const pending = this.pendingLifecycle;
+    if (!pending || pending.epoch !== this.epoch || !current || current.manager !== pending.manager || current.id !== pending.id) return undefined;
+    // Retain a usable provider for deferred replay, never as an ownership fence.
+    pending.context = context as ContextUsageProvider;
+    return pending;
+  }
+  /**
+   * Pi can emit session_shutdown after /fork mutates the active manager's ID.
+   * Shutdown therefore owns the captured manager/epoch, while ordinary
+   * callbacks remain fenced to that manager's original ID.
+   */
+  private shutdownSessionFence(context: unknown): boolean {
+    const manager = sessionManager(context);
+    return this.rootSession
+      && this.ownerEpoch === this.epoch
+      && manager !== null
+      && manager === this.sessionManager;
+  }
+  /** A detached startup has the same manager/epoch ownership rule. */
+  private pendingShutdownFence(context: unknown): boolean {
+    const pending = this.pendingLifecycle;
+    const manager = sessionManager(context);
+    return pending !== null
+      && pending.epoch === this.epoch
+      && manager !== null
+      && manager === pending.manager;
+  }
+  private isIngressOpen(): boolean { return this.ingressEpoch === this.epoch; }
+  private canOutput(): boolean { return this.isIngressOpen() && this.rootSession && this.consumerActive && this.outputReady; }
+  private discardPendingLifecycle(epoch: number) { if (this.pendingLifecycle?.epoch === epoch) this.pendingLifecycle = null; }
+  private hasActiveSessionContext(context: unknown): context is ContextUsageProvider { return this.activeSessionFence(context) !== undefined; }
+  private isActiveSessionFence(fence: { epoch: number; context: ContextUsageProvider }): boolean {
+    return this.epoch === fence.epoch && this.hasActiveSessionContext(fence.context);
+  }
+  /** Never coalesce edges: retain exact order to capacity, then drop the whole sequence and fail closed. */
+  private appendPendingLifecycle(pending: PendingLifecycle, edge: PendingLifecycleEdge) {
+    if (pending.overflow) return;
+    if (pending.edges.length >= MAX_PENDING_LIFECYCLE_EDGES) { pending.edges = []; pending.overflow = true; return; }
+    pending.edges.push(edge);
+  }
+
+  handleAgentStart(context: unknown) {
+    if (!this.outputReady || !this.consumerActive || !this.hasActiveSessionContext(context)) {
+      const pending = this.pendingSession(context);
+      if (pending) this.appendPendingLifecycle(pending, { kind: "agent_start" });
+      return;
+    }
+    this.startActiveAgent(context as ContextUsageProvider);
+  }
+
+  private startActiveAgent(context: ContextUsageProvider) {
+    this.activateLocalCandidates();
+    this.context = context;
+    const client = this.client;
+    const ref = this.sessionRef;
+    const epoch = this.epoch;
+    if (client && ref) void client.reportSession(ref).then(() => { if (epoch !== this.epoch || this.client !== client) return; }).catch(() => {});
+    // Each agent_start starts a fresh reducer turn even when detached edges
+    // are replayed after a previous turn already settled.
+    this.terminal = "success";
+    this.toolFailed = false;
+    if (!this.active) {
+      this.active = true;
+      this.turn += 1;
+      this.usage = new UsageTracker();
+      this.startLongRunningTimer();
+    }
+    this.updateContextUsage();
+    this.publish("running");
+  }
+
+  handleTurnStart(context: unknown) {
+    if (!this.outputReady || !this.hasActiveSessionContext(context)) {
+      const pending = this.pendingSession(context);
+      if (pending) this.appendPendingLifecycle(pending, { kind: "turn_start", contextPercent: deriveContextPercent(pending.context) });
+      return;
+    }
+    this.context = context;
+    this.updateContextUsage();
+  }
+
+  handleAgentEnd(event: unknown, context: unknown) {
+    if (!this.outputReady || !this.hasActiveSessionContext(context)) {
+      const pending = this.pendingSession(context);
+      if (pending) this.appendPendingLifecycle(pending, { kind: "agent_end", terminal: deriveExplicitTerminal(event) });
+      return;
+    }
+    this.terminal = deriveTerminalState(event, this.toolFailed);
+  }
+
+  handleAgentSettled(context: unknown) {
+    const fence = this.outputReady ? this.activeSessionFence(context) : undefined;
+    if (!fence) {
+      const pending = this.pendingSession(context);
+      if (!pending) return;
+      try { if (pending.context.isIdle?.() === false) return; } catch { return; }
+      this.appendPendingLifecycle(pending, { kind: "agent_settled" });
+      return;
+    }
+    try {
+      const idle = fence.context.isIdle;
+      if (idle && idle() === false) return;
+    } catch { return; }
+    this.settleActiveAgent(fence);
+  }
+
+
+  /** Emit one terminal state/event pair only while the captured lifecycle still owns this session. */
+  private settleActiveAgent(fence: { epoch: number; context: ContextUsageProvider }) {
+    if (!this.consumerActive || !this.active || !this.isActiveSessionFence(fence)) return;
+    this.activateLocalCandidates();
+    if (!this.active || !this.isActiveSessionFence(fence)) return;
+    this.active = false;
+    this.clearLongRunningTimer();
+    this.updateContextUsage();
+    // A settlement emits a state and a terminal, so reserve both before either can consume the final ordinal.
+    if (this.reserveLocalOrdinals(2, true)) {
+      const stateOrdinal = this.consumeLocalOrdinal();
+      const terminalOrdinal = this.consumeLocalOrdinal();
+      if (stateOrdinal && terminalOrdinal) {
+        this.publishPi(this.terminal, this.terminal === "error" ? "failure" : undefined, stateOrdinal);
+        if (this.localPiActive && this.localPi && this.terminalEventId < MAX_INTEGER) {
+          this.terminalEventId += 1;
+          this.localPi.publishTerminal({ version: 2, generation: terminalOrdinal.generation, sequence: terminalOrdinal.sequence, source: "pi", eventId: this.terminalEventId, outcome: this.terminal === "error" ? "failed" : this.terminal === "cancelled" ? "cancelled" : "completed" });
+        }
+      }
+    }
+  }
+
+  handleMessageEnd(event: unknown, context: unknown) {
+    if (!this.outputReady || !this.hasActiveSessionContext(context)) {
+      const pending = this.pendingSession(context);
+      const usage = deriveUsage(event);
+      if (pending && usage) this.appendPendingLifecycle(pending, { kind: "message_end", usage });
+      return;
+    }
+    const usage = deriveUsage(event);
+    if (usage) {
+      this.usage.add(usage);
+      this.updateContextUsage();
+      this.render();
+    }
+  }
+
+  handleToolResult(event: unknown, context: unknown) {
+    if (!this.outputReady || !this.hasActiveSessionContext(context)) {
+      const pending = this.pendingSession(context);
+      if (pending) this.appendPendingLifecycle(pending, this.derivePendingTool(event));
+      return;
+    }
+    this.applyToolResult(event);
+  }
+
+  /** Reduce a detached tool payload immediately to error/count state before retaining it. */
+  private derivePendingTool(event: unknown): PendingLifecycleEdge {
+    const failed = (event as { isError?: unknown })?.isError === true;
+    let todo: PresenceStateInputV2 | null = null;
+    try { todo = this.todo.accept(event, this.pi.getAllTools(), 0, 0); } catch {}
+    return { kind: "tool_result", failed, ...(todo ? { todo: { state: todo.state, ...(todo.progress ? { progress: todo.progress } : {}) } } : {}) };
+  }
+  private applyToolResult(event: unknown) {
+    if ((event as { isError?: unknown })?.isError === true && this.active) this.toolFailed = true;
+    this.activateLocalCandidates();
+    const ordinal = this.nextLocalOrdinal();
+    if (!ordinal) return;
+    let todo: PresenceStateInputV2 | null = null;
+    try { todo = this.todo.accept(event, this.pi.getAllTools(), ordinal.generation, ordinal.sequence); } catch {}
+    if (todo) this.publishTodo(todo);
+  }
+  private applyDerivedTool(edge: Extract<PendingLifecycleEdge, { kind: "tool_result" }>) {
+    if (edge.failed && this.active) this.toolFailed = true;
+    this.activateLocalCandidates();
+    const ordinal = this.nextLocalOrdinal();
+    if (ordinal && edge.todo) this.publishTodo({ version: 2, generation: ordinal.generation, sequence: ordinal.sequence, source: "todo", ...edge.todo });
+  }
+  private replayPendingLifecycle(pending: PendingLifecycle) {
+    if (pending.overflow) return;
+    const fence = this.activeSessionFence(pending.context);
+    if (!fence) return;
+    for (const edge of pending.edges) {
+      if (!this.isActiveSessionFence(fence)) return;
+      switch (edge.kind) {
+        case "agent_start": this.startActiveAgent(pending.context); break;
+        case "turn_start": if (edge.contextPercent !== undefined) this.usage.setContext({ contextPercent: edge.contextPercent }); break;
+        case "agent_end": this.terminal = edge.terminal ?? (this.toolFailed ? "error" : "success"); break;
+        case "agent_settled": this.settleActiveAgent(fence); break;
+        case "message_end": this.usage.add(edge.usage); this.updateContextUsage(); this.render(); break;
+        case "tool_result": this.applyDerivedTool(edge); break;
+      }
+    }
+  }
+
+  async shutdownSession(context: object) {
+    // An unfenced shutdown could tear down a replacement session. Unlike
+    // ordinary callbacks, /fork may mutate the legitimate owner's ID before
+    // Pi emits shutdown, so this fence intentionally checks manager + epoch.
+    if (!this.shutdownSessionFence(context) && !this.pendingShutdownFence(context)) return;
+    ++this.epoch;
+    this.ingressEpoch = null;
+    this.outputReady = false;
+    this.pendingLifecycle = null;
+    this.clearExternalAttention();
+    this.clearFailureArrivals();
+    // Reserve this teardown synchronously. A cache-busted replacement can queue
+    // startup immediately afterwards, but cannot acquire authority before this
+    // client's bounded remote cleanup has completed.
+    return processCoordinator.enqueueAuthority(() => this.transition(() => this.teardown()));
+  }
+
+  private publish(state: PresenceStateInputV2["state"], reason?: "failure") {
+    if (!this.rootSession) return;
+    const ordinal = this.nextLocalOrdinal();
+    if (ordinal) this.publishPi(state, reason, ordinal);
+  }
+
+  private publishPi(state: PresenceStateInputV2["state"], reason: "failure" | undefined, ordinal: { generation: number; sequence: number }) {
+    const snapshot: PresenceStateInputV2 = { version: 2, generation: ordinal.generation, sequence: ordinal.sequence, source: "pi", state, ...(reason ? { attention: { reason, occurrence: "new" as const } } : {}) };
+    this.lastPiState = snapshot;
+    if (this.localPiActive) this.localPi?.publishState(snapshot);
+  }
+
+  private publishTodo(snapshot: PresenceStateInputV2) {
+    this.lastTodoState = snapshot;
+    if (this.localTodoActive) this.localTodo?.publishState(snapshot);
+  }
+
+  /** Reserve output slots plus enough room to withdraw every source we currently own at generation max. */
+  private reserveLocalOrdinals(slots: number, terminal = false): boolean {
+    if (slots < 1 || slots > MAX_INTEGER) return false;
+    const owners = this.localOwnerCount();
+    const enough = this.sequence + slots <= MAX_INTEGER
+      && (!terminal || this.terminalEventId < MAX_INTEGER)
+      && (this.generation < MAX_INTEGER || this.sequence + slots + owners <= MAX_INTEGER);
+    if (enough) return true;
+    if (this.generation < MAX_INTEGER) {
+      this.generation += 1;
+      this.sequence = 0;
+      this.terminalEventId = 0;
+      return true;
+    }
+    return this.rotateLocalSources();
+  }
+
+  private consumeLocalOrdinal(): { generation: number; sequence: number } | undefined {
+    if (this.sequence >= MAX_INTEGER) return undefined;
+    this.sequence += 1;
+    return { generation: this.generation, sequence: this.sequence };
+  }
+
+  private nextLocalOrdinal(): { generation: number; sequence: number } | undefined {
+    return this.reserveLocalOrdinals(1) ? this.consumeLocalOrdinal() : undefined;
+  }
+
+  private localOwnerCount(): number { return Number(this.localPiActive) + Number(this.localTodoActive); }
+
+  /** At the generation ceiling, withdraw owned retained sources before discarding their producer fences. */
+  private rotateLocalSources(): boolean {
+    const owners = this.localOwnerCount();
+    if (this.sequence + owners > MAX_INTEGER) return false;
+    this.withdrawAndDeactivateLocalSources();
+    this.localPi = null;
+    this.localTodo = null;
+    this.localPiActive = false;
+    this.localTodoActive = false;
+    this.generation = 0;
+    this.sequence = 0;
+    this.terminalEventId = 0;
+    this.rotationPending = true;
+    this.activateLocalCandidates();
+    return true;
+  }
+
+  /** Use a valid event before deactivation so consumer state cannot survive an owned source rotation. */
+  private withdrawAndDeactivateLocalSources() {
+    const owners = this.localOwnerCount();
+    // Teardown can occur between ordinary publications; advance once when that is enough to retain valid withdrawal ordinals.
+    if (owners > 0 && this.sequence + owners > MAX_INTEGER && this.generation < MAX_INTEGER) {
+      this.generation += 1;
+      this.sequence = 0;
+      this.terminalEventId = 0;
+    }
+    if (this.localPiActive && this.localPi) {
+      const ordinal = this.consumeLocalOrdinal();
+      if (ordinal) this.localPi.withdraw({ version: 2, generation: ordinal.generation, sequence: ordinal.sequence, source: "pi" });
+      this.localPi.deactivate();
+    }
+    if (this.localTodoActive && this.localTodo) {
+      const ordinal = this.consumeLocalOrdinal();
+      if (ordinal) this.localTodo.withdraw({ version: 2, generation: ordinal.generation, sequence: ordinal.sequence, source: "todo" });
+      this.localTodo.deactivate();
+    }
+    this.localPiActive = false;
+    this.localTodoActive = false;
+  }
+
+  /** One live input lifecycle yields at most one alert; retained replay only restores pane state. */
+  private syncInputNotification(liveInput = false) {
+    const events = [...this.states.values()];
+    const inputPresent = events.some(isInteractionWaiting);
+    if (!inputPresent) { this.inputLifecycleActive = false; this.inputNotificationPending = false; this.inputNotificationAttempted = false; return; }
+    if (!this.inputLifecycleActive) this.inputLifecycleActive = true;
+    if (this.inputNotificationAttempted) return;
+    if (liveInput) this.inputNotificationPending = true;
+    const suppressed = events.some(event => event.state === "error" || event.attention?.reason === "failure");
+    if (!this.inputNotificationPending || !this.outputReady || suppressed) return;
+    this.inputNotificationTransitions = Math.min(MAX_NOTIFICATION_TRANSITIONS, this.inputNotificationTransitions + 1);
+    this.discardExternalProgress();
+    this.inputNotificationAttempted = this.notify("attention", `input:${this.turn}:${this.inputNotificationTransitions}`, "Pi needs your input", "Pi needs your input", "local");
+    if (this.inputNotificationAttempted) this.inputNotificationPending = false;
+  }
+
+  /** The startup projection is awaited so agent, metadata, then notifications stay ordered. */
+  private async renderCurrent() {
+    const ref = this.sessionRef;
+    const client = this.client;
+    if (!this.canOutput() || !ref || !client) return;
+    const events = [...this.states.values()];
+    const state = compositeState(events, this.active);
+    const terminals = this.currentTerminalBatch();
+    await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
+    await client.metadata(presentation(), metadata(events, terminals, this.usage.snapshot()));
+  }
+
+  private render(attention?: PresenceStateV2) {
+    const ref = this.sessionRef;
+    const client = this.client;
+    if (!this.canOutput() || !ref || !client) return;
+    const events = [...this.states.values()];
+    const state = compositeState(events, this.active);
+    void client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
+    this.renderMetadata(events, client);
+
+    this.dispatchStateAttention(attention);
+  }
+
+  /** Metadata-only refreshes must not repeat an unchanged pane agent report. */
+  private renderMetadata(events = [...this.states.values()], client = this.client) {
+    if (!this.canOutput() || !client) return;
+    void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot()));
+  }
+
+  /** Applies one already-accepted live state edge without re-rendering startup state. */
+  private dispatchStateAttention(attention?: PresenceStateV2) {
+    const text = attention && attentionText(attention, this.config.maxLabelChars);
+    const reason = attention?.attention?.reason;
+    if (!attention || !text || text.inputNeeded || !reason) return;
+    const origin = attention.source === "pi" || attention.source === "todo" ? "local" : "external";
+    const attentionKind = reason === "failure" || reason === "blocked" ? "error" : "success";
+    const severity = text.error ? "error" : "success";
+    if (reason === "failure") {
+      // Let a same-turn terminal claim the alert, while state-only failures retain
+      // their normal policy, coalescing, and rate-limit behavior.
+      this.queueStateFailure(attention.source, attention.generation, () =>
+        this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin),
+      );
+      return;
+    }
+    this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin);
+  }
+
+  /** Records each exact terminal identity once, including across reset producer fences. */
+  private recordTerminal(event: PresenceTerminalV2, schedule = true): boolean {
+    const key = this.terminalIdentity(event);
+    const current = this.terminalRecords.find(record => this.terminalIdentity(record) === key);
+    const recordedOutcome = this.terminalTombstones.get(key);
+    if (current || recordedOutcome !== undefined) {
+      // Touch known identities so the bounded registry remains LRU even on replay.
+      if (recordedOutcome !== undefined) {
+        this.terminalTombstones.delete(key);
+        this.terminalTombstones.set(key, recordedOutcome);
+      }
+      // Both exact replays and conflicting outcomes fail closed without output.
+      return false;
+    }
+    this.terminalTombstones.set(key, event.outcome);
+    while (this.terminalTombstones.size > MAX_TERMINAL_TOMBSTONES) {
+      const oldest = this.terminalTombstones.keys().next().value;
+      if (oldest === undefined) break;
+      this.terminalTombstones.delete(oldest);
+    }
+    if (this.terminalRecords.length >= MAX_TERMINALS) this.omitOldestTerminal();
+    this.terminalRecords.push(event);
+    this.trimTerminalValue();
+    if (schedule) this.scheduleTerminalClear();
+    return true;
+  }
+
+  private terminalIdentity(event: PresenceTerminalV2): string { return `${event.source}:${event.generation}:${event.eventId}`; }
+  private omitOldestTerminal() {
+    if (this.terminalRecords.shift()) this.terminalOverflow = Math.min(MAX_TERMINAL_OVERFLOW, this.terminalOverflow + 1);
+  }
+  /** Keep the newest retained records while using the shared canonical encoder. */
+  private trimTerminalValue() {
+    while (this.terminalRecords.length > 0) {
+      const batch = encodeTerminalBatch(this.terminalRecords, this.terminalOverflow);
+      if (Buffer.byteLength(batch.value, "utf8") <= HERDR_TERMINAL_VALUE_MAX_BYTES) return;
+      this.omitOldestTerminal();
+    }
+  }
+
+  /** Terminal alert policy runs after recording so metadata always includes its batch. */
+  private dispatchTerminal(event: PresenceTerminalV2, emitMetadata = true) {
+    const events = [...this.states.values()];
+    const client = this.client;
+    if (emitMetadata && this.rootSession && this.consumerActive && this.outputReady && client) {
+      void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot()));
+    }
+    if (!this.outputReady) return;
+    const severity = event.outcome === "failed" ? "error" : "success";
+    const origin = event.source === "pi" ? "local" : "external";
+    const key = `terminal:${event.source}:${event.generation}:${event.eventId}`;
+    if (severity === "error") {
+      this.suppressPairedStateFailure(event.source, event.generation);
+      this.discardExternalProgress();
+      this.notifyTerminalFailure(key, origin);
+      return;
+    }
+    this.notify(severity, key, "Pi activity completed", "Pi activity completed", origin);
+  }
+
+  /** An absent batch withdraws both terminal metadata tokens with null. */
+  private currentTerminalBatch(): TerminalBatch | undefined {
+    return this.terminalRecords.length > 0 ? encodeTerminalBatch(this.terminalRecords, this.terminalOverflow) : undefined;
+  }
+
+  /** State failures wait only for a synchronous same-generation terminal. */
+  private queueStateFailure(source: string, generation: number, notify: () => void) {
+    this.purgeFailureArrivals();
+    const terminalIndex = this.failureArrivals.findIndex(entry => entry.source === source && entry.generation === generation && entry.kind === "terminal");
+    if (terminalIndex >= 0) { this.removeFailureArrival(this.failureArrivals[terminalIndex]!); return; }
+    const entry: FailureArrival = { source, generation, kind: "state", expiresAt: Date.now() + FAILURE_PAIR_WINDOW_MS, notify };
+    entry.timer = setTimeout(() => this.expireFailureArrival(entry), FAILURE_PAIR_WINDOW_MS);
+    entry.timer.unref?.();
+    this.rememberFailure(entry);
+  }
+
+  /** A terminal never loses its own alert; it only cancels one paired state alert. */
+  private suppressPairedStateFailure(source: string, generation: number) {
+    this.purgeFailureArrivals();
+    const stateIndex = this.failureArrivals.findIndex(entry => entry.source === source && entry.generation === generation && entry.kind === "state");
+    if (stateIndex >= 0) { this.removeFailureArrival(this.failureArrivals[stateIndex]!); return; }
+    const entry: FailureArrival = { source, generation, kind: "terminal", expiresAt: Date.now() + FAILURE_PAIR_WINDOW_MS };
+    entry.timer = setTimeout(() => this.expireFailureArrival(entry), FAILURE_PAIR_WINDOW_MS);
+    entry.timer.unref?.();
+    this.rememberFailure(entry);
+  }
+
+  private expireFailureArrival(entry: FailureArrival) {
+    if (!this.removeFailureArrival(entry)) return;
+    entry.notify?.();
+  }
+  private removeFailureArrival(entry: FailureArrival): boolean {
+    const index = this.failureArrivals.indexOf(entry);
+    if (index < 0) return false;
+    this.failureArrivals.splice(index, 1);
+    if (entry.timer) clearTimeout(entry.timer);
+    return true;
+  }
+  /** Expired state entries dispatch rather than silently losing their independent edge. */
+  private purgeFailureArrivals(now = Date.now()) {
+    for (const entry of [...this.failureArrivals]) if (entry.expiresAt <= now && this.removeFailureArrival(entry)) entry.notify?.();
+  }
+  /** The pairing registry is bounded; an evicted state is dispatched rather than silently lost. */
+  private rememberFailure(entry: FailureArrival) {
+    this.failureArrivals.push(entry);
+    while (this.failureArrivals.length > MAX_FAILURE_PAIRS) {
+      const expired = this.failureArrivals.shift();
+      if (expired?.timer) clearTimeout(expired.timer);
+      expired?.notify?.();
+    }
+  }
+
+  private dispatchAttention(attention: PresenceStateV2, attentionKind: "error" | "success", severity: "error" | "success", title: string, body: string, origin: "local" | "external") {
+    const externalTransition = origin === "external" && this.externalAttention.accept(attention.source, attention.generation, attentionKind);
+    if (origin === "external") {
+      if (externalTransition) this.queueExternalAttention(severity, title, body);
+      return;
+    }
+    if (severity === "error") this.discardExternalProgress();
+    this.notify(severity, `${attention.source}:${attention.generation}:${attention.sequence}:${this.turn}:${attention.attention?.reason}`, title, body, "local");
+  }
+
+  /** A terminal-only failure cannot be derived by unmodified Herdr from the V2 token map. */
+  private notifyTerminalFailure(key: string, origin: "local" | "external"): boolean {
+    return this.notify("error", key, "Pi needs attention", "A Pi task needs attention", origin);
+  }
+
+  private scheduleTerminalClear() {
+    if (this.terminalClearTimer || this.terminalRecords.length === 0) return;
+    const epoch = this.epoch;
+    const timer = setTimeout(() => {
+      if (this.terminalClearTimer !== timer) return;
+      this.terminalClearTimer = undefined;
+      if (this.epoch !== epoch) return;
+      this.terminalRecords = [];
+      this.terminalTombstones.clear();
+      this.terminalOverflow = 0;
+      this.renderMetadata();
+    }, this.config.finalClearMs);
+    timer.unref?.();
+    this.terminalClearTimer = timer;
+  }
+
+  /** Event-bus bursts get one static alert; error replaces pending progress without delaying the first timer. */
+  private queueExternalAttention(severity: "error" | "success" | "info", title: string, body: string) {
+    const pending = this.externalPending;
+    if (pending) {
+      const priority = { info: 0, success: 1, error: 2 };
+      if (priority[severity] > priority[pending.severity]) { pending.severity = severity; pending.title = title; pending.body = body; }
+      return;
+    }
+    const next = { severity, title, body, timer: undefined as unknown as ReturnType<typeof setTimeout> };
+    next.timer = setTimeout(() => {
+      if (this.externalPending !== next) return;
+      this.externalPending = null;
+      this.notify(next.severity, `external:${++this.externalNotificationSequence}:${next.severity}`, next.title, next.body, "external");
+    }, EXTERNAL_NOTIFICATION_COALESCE_MS);
+    next.timer.unref?.();
+    this.externalPending = next;
+  }
+
+  private discardExternalProgress() { const pending = this.externalPending; if (!pending || pending.severity === "error") return; clearTimeout(pending.timer); this.externalPending = null; }
+  private clearExternalAttention() { if (this.externalPending) clearTimeout(this.externalPending.timer); this.externalPending = null; this.externalAttention.clear(); }
+  /** Dispatches one static, attribution-free toast after policy, TTL/LRU, and rate fences. */
+  private notify(severity: NotificationSeverity, key: string, title: string, body: string, origin: "local" | "external"): boolean {
+    if (!this.canOutput() || !shouldNotify(this.config.notificationPolicy, this.config.notifications, severity, origin)) return false;
+    if (!this.notifications.canAccept(key)) { this.notifications.accept(key); return false; }
+    if (!this.notificationRate.accept(this.notificationCooldownKind(severity, key))) return false;
+    this.notifications.accept(key);
+    void this.client?.notify(title, body, severity === "error" || severity === "attention", key);
+    return true;
+  }
+
+  private notificationCooldownKind(severity: NotificationSeverity, key: string): NotificationCooldownKind {
+    return severity === "error" ? "error" : key.startsWith("input:") ? "input" : key.startsWith("blocked:") ? "blocked" : "other";
+  }
+
+  private startLongRunningTimer() {
+    this.clearLongRunningTimer();
+    const epoch = this.epoch;
+    const turn = this.turn;
+    this.longRunningTimer = setTimeout(() => {
+      this.longRunningTimer = undefined;
+      if (this.epoch === epoch && this.active && this.turn === turn) this.notify("long-running", `long-running:${turn}`, "Pi is still working", "A Pi task is taking longer than expected", "local");
+    }, this.config.longRunningMs);
+    this.longRunningTimer.unref?.();
+  }
+
+  private clearLongRunningTimer() { if (this.longRunningTimer) clearTimeout(this.longRunningTimer); this.longRunningTimer = undefined; }
+
+  /** Activate only unowned candidates. A successful takeover replays a newly ordinaled snapshot. */
+  private activateLocalCandidates() {
+    if (!this.rootSession || !this.consumerActive || !this.consumer) return;
+    const emit = (name: string, payload: unknown) => { try { this.pi.events.emit(name, payload); } catch {} };
+    if (!this.localPi) this.localPi = createPresenceProducer({ source: "pi", emit }) ?? null;
+    if (!this.localTodo) this.localTodo = createPresenceProducer({ source: "todo", emit }) ?? null;
+    const piActivated = !this.localPiActive && this.localPi?.activate() === true;
+    const todoActivated = !this.localTodoActive && this.localTodo?.activate() === true;
+    if (piActivated) this.localPiActive = true;
+    if (todoActivated) this.localTodoActive = true;
+    const reset = this.rotationPending;
+    if (piActivated && this.lastPiState) this.replayLocalState("pi", reset);
+    if (todoActivated && this.lastTodoState) this.replayLocalState("todo", reset);
+    if (reset && (piActivated || todoActivated)) this.rotationPending = false;
+  }
+
+  private replayLocalState(source: LocalSource, reset: boolean) {
+    const previous = source === "pi" ? this.lastPiState : this.lastTodoState;
+    if (!previous) return;
+    const ordinal = reset ? this.consumeLocalOrdinal() : this.nextLocalOrdinal();
+    if (!ordinal || !(source === "pi" ? this.localPiActive : this.localTodoActive)) return;
+    const { generation: _generation, sequence: _sequence, ...fields } = previous;
+    const snapshot = { ...fields, generation: ordinal.generation, sequence: ordinal.sequence } as PresenceStateInputV2;
+    if (source === "pi") this.publishPi(snapshot.state, snapshot.attention?.reason === "failure" ? "failure" : undefined, ordinal);
+    else this.publishTodo(snapshot);
+  }
+
+  private updateContextUsage() { try { this.usage.setContext(this.context?.getContextUsage?.()); } catch {} }
+  private clearTerminalClearTimer() { if (this.terminalClearTimer) clearTimeout(this.terminalClearTimer); this.terminalClearTimer = undefined; }
+  private clearFailureArrivals() {
+    for (const entry of this.failureArrivals) if (entry.timer) clearTimeout(entry.timer);
+    this.failureArrivals.length = 0;
+  }
+
+  private teardownLocal() {
+    this.clearTerminalClearTimer();
+    this.clearLongRunningTimer();
+    this.clearExternalAttention();
+    // The ordinary ordinal reservation leaves withdrawal room at the maximum generation.
+    this.withdrawAndDeactivateLocalSources();
+    this.localPi = null;
+    this.localTodo = null;
+    this.lastPiState = null;
+    this.lastTodoState = null;
+    this.rotationPending = false;
+    this.consumer?.deactivate();
+    this.consumer = null;
+    this.consumerReady = null;
+    this.consumerActive = false;
+    this.outputReady = false;
+    this.states.clear();
+    this.terminalRecords = [];
+    this.terminalTombstones.clear();
+    this.terminalOverflow = 0;
+    this.sessionId = null;
+    this.sessionRef = null;
+    this.context = null;
+    this.sessionManager = null;
+    this.ingressEpoch = null;
+    this.ownerEpoch = 0;
+    this.active = false;
+    this.rootSession = false;
+    this.inputLifecycleActive = false;
+    this.notifications.clear();
+    this.notificationRate.clear();
+    this.inputNotificationPending = false;
+    this.inputNotificationAttempted = false;
+    this.inputNotificationTransitions = 0;
+    this.clearFailureArrivals();
+  }
+
+  private async teardown() {
+    // Detach the remote handle before local cleanup. An unowned activation
+    // failure calls teardownLocal directly and therefore never reaches socket output.
+    const client = this.client;
+    const authorityGeneration = this.authorityGeneration;
+    this.client = null;
+    this.authorityGeneration = null;
+    this.teardownLocal();
+    if (!client) return;
+    if (authorityGeneration !== null && processCoordinator.isAuthority(authorityGeneration)) {
+      await client.teardown(this.config.timeoutMs).catch(() => {});
+      processCoordinator.releaseAuthority(authorityGeneration);
+    } else await client.close(0).catch(() => {});
+  }
 }

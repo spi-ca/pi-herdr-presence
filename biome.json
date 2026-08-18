@@ -18,5 +18,11 @@
       }
     }
   },
+  "overrides": [
+    {
+      "includes": ["test/fixtures/herdr-agent-state-v8.ts"],
+      "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
+    }
+  ],
   "assist": { "enabled": false }
 }

@@ -1,60 +1,54 @@
 # pi-herdr-presence
 
-`pi-herdr-presence`는 Pi TUI의 축약된 local presence를 Herdr에 request-per-connection Unix 소켓으로만 보고하는 로컬 확장입니다. **Linux와 macOS만 지원**하며 Windows/named pipe는 지원하지 않습니다. CLI·shell·자식 프로세스·polling·subscription은 사용하지 않습니다.
+`pi-herdr-presence` is a Pi TUI extension that reports local presence to Herdr through its supplied Unix socket. It supports Linux and macOS only; it never runs a CLI, shell, child process, poller, or subscription.
 
-## 설치와 reload
-
-이 패키지는 GitHub 저장소에서 설치합니다.
+## Install
 
 ```bash
 pi install git:github.com/spi-ca/pi-herdr-presence
-# 현재 프로젝트에만 설치
+# project-local
 pi install -l git:github.com/spi-ca/pi-herdr-presence
 ```
 
-로컬 checkout을 개발할 때는 저장소의 **absolute path**를 설치합니다.
+Use an absolute checkout path for local development and run `/reload` after changing it.
+
+## Pi runtime requirement
+
+This extension requires `@earendil-works/pi-coding-agent` `^0.82.0`. Its lifecycle contract uses `agent_end` only to derive the terminal outcome and requires the runtime's `agent_settled` callback to settle that outcome; no compatibility fallback is installed.
+
+## Herdr behavior
+
+The extension runs only with `HERDR_ENV=1`, an absolute `HERDR_SOCKET_PATH`, a nonempty `HERDR_PANE_ID`, and a TUI `session_start`. Each request uses a new socket connection; observer, validation, serialization, and socket failures never fail Pi lifecycle work.
+
+It reports `pane.report_agent_session`, `pane.report_agent`, `pane.report_metadata`, best-effort `notification.show`, and teardown `pane.clear_agent_authority`. Session references are ID-only (`agent_session_id`); paths, prompts, outputs, errors, and producer labels never enter Herdr metadata.
+
+Each ordinary metadata report uses Herdr v8's supported fixed presentation fields (`title: "Pi"`, `display_agent: "Pi"`, and fixed state labels) plus the exact nine-token map. The fixed nine-token projection is:
+
+`v2_progress`, `v2_attention`, `v2_interaction`, `v2_subagents`, `v2_terminals`, `v2_terminal_overflow`, `tokens`, `cost`, `context`.
+
+Before restoring session authority, startup retains a bounded, ordered, derived lifecycle-edge queue. It always completes cleanup, then the session-authority report, then the startup projection and queued-edge replay; no callback can publish ahead of that commit. Startup sends two bounded, non-retried cleanup patches: the current V2 presentation-clear flags plus all nine `null` tokens, then the prior extension's exact legacy-only allowlist (`active`, terminal/progress/subagent counters and flags). The chunks stay separate (9 and 12 tokens), contain no paths or text, and settle before any session report or fixed presentation. Every render includes all nine keys, with absent values set to `null`. `v2_terminals` uses the shared canonical encoding, retains the newest records, and is shortened by omitting oldest records until its UTF-8 value is at most Herdr's 80-byte limit; each omission increments bounded `v2_terminal_overflow`. Teardown repeats both cleanup chunks within one aggregate deadline. Only if those stages leave time and the client remains open does it make at most one priority, non-retried `pane.clear_agent_authority` attempt with exactly `pane_id`, `source: "herdr:pi"`, and `seq`; deadline expiry can prevent that dispatch, so it is not an unconditional exactly-once action. Cleanup remains active when ordinary metadata projection is disabled.
+
+## Managed authority and notifications
+
+A Herdr-managed `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` is authoritative and disables this extension. The local reporter is fail-closed by default: set `PI_HERDR_PRESENCE_SOLE_REPORTER=1` only when an operator has verified it is the sole pane reporter. Local reporting starts only when that explicit opt-in **and** an exact `ENOENT` for the managed asset both hold. Any other probe result—including a present, unreadable, malformed, ambiguous, unsafe, or timed-out asset—remains blocked; an unresolved probe lease prevents further probes until the underlying filesystem operation settles.
+
+Within one Bun runtime, a non-configurable `globalThis[Symbol.for("pi-herdr-presence/process-coordinator/v1")]` coordinator survives cache-busted reloads and `/fork`. It serializes authority startup and teardown, leases one unresolved managed-hook probe and socket fingerprint, and allocates strictly increasing Herdr sequences. Lifecycle hooks start and shutdown this work detached, so they never make Pi await probing, socket I/O, or cleanup. `session_shutdown` first invalidates its ownership and reserves its old cleanup slot synchronously, so a subsequently queued runtime cannot start authority work until bounded old cleanup completes. Authority generations make a shutdown that arrives late from an old runtime close only its local resources rather than clear the newer pane authority. This is same-runtime coordination, not cross-process locking; it does not await Pi host callbacks.
+
+**Threat model:** Same-JS-realm extensions are trusted arbitrary code. The coordinator is not an authentication, authorization, or sandbox boundary. Its immutable shape and proxy checks fail closed only to prevent accidental or structural misuse; they cannot protect against a trusted extension that deliberately controls the shared realm.
+
+For live (never replayed), receipt-accepted V2 edges, the default `errors` policy sends one static best-effort alert for terminal failures and new `attention.reason` values of `blocked`, `input_required`, or `failure`. It keeps start, progress, ordinary completion, and long-running work quiet. The opt-in `background` and `all` policies also permit the local long-running timer to send its static alert; it is a timer exception, not a replayed V2 edge. Alerts are bounded by per-edge TTL/LRU deduplication and a session rate limit, are never retried, and contain no producer text.
+
+## Documentation
+
+The pinned shared V2 sources are the canonical [protocol API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md), [consumer/producer lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md), and [terminal encoding fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json).
+
+- [Herdr configuration, socket, and authority](docs/configuration.md)
+- [Nine-token projection and canonical V2 references](docs/event-contract.md)
+- [Lifecycle and privacy behavior](docs/feature-ownership.md)
+- [Development and verification](docs/development.md)
 
 ```bash
-pi install /absolute/path/to/pi-herdr-presence
-```
-
-코드나 package 설정을 변경한 실행 중인 Pi에서는 `/reload`를 실행합니다. 제거는 설치에 사용한 source로 합니다.
-
-```bash
-pi remove git:github.com/spi-ca/pi-herdr-presence
-pi remove -l git:github.com/spi-ca/pi-herdr-presence
-```
-
-## 활성화와 소유권
-
-확장은 `HERDR_ENV=1`, absolute `HERDR_SOCKET_PATH`, nonempty `HERDR_PANE_ID`, 그리고 `session_start` context의 `mode === "tui"`가 모두 있을 때만 동작합니다.
-
-Herdr-managed `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`가 있으면 marker가 정확히 `HERDR_INTEGRATION_ID=pi`인지와 무관하게 이 확장은 완전히 비활성입니다. marker 없음과 probe 오류는 모두 fail-closed이며, **ENOENT 파일 부재만** local integration을 허용합니다. managed integration을 제거/비활성화하고 Pi에서 `/reload`한 뒤에만 이 확장을 사용하세요.
-
-모든 lifecycle 요청은 단일 authority인 `source: "herdr:pi"`, `agent: "pi"`를 사용합니다.
-
-- session report와 state report는 `ctx.sessionManager.getSessionFile()`의 absolute path를 우선하고 session ID를 fallback으로 사용합니다. session ref는 매 `agent_start`에서 새로 고칩니다.
-- metadata는 `applies_to_source: "herdr:pi"`를 사용합니다.
-- teardown은 `clear_title`, `clear_display_agent`, `clear_state_labels`와 15개 owned token(`active`…`context`, `subagents`, `subagent_wait`, `subagent_error`, `subagent_terminal`, `subagent_terminal_at`)의 null patch와 priority release를 각각 한 번씩, close와 함께 하나의 configured timeout budget 안에서 best-effort로 시도합니다. 만료 시 transport를 abort하고 이후 cleanup dispatch를 중단합니다.
-
-## 동작
-
-- `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, 선택 `notification.show`를 보냅니다.
-- local Pi lifecycle, `herdr:blocked`, retained `pi-presence:update:v1` producer 상태를 `working`/`blocked`/`idle` composite state로 렌더합니다. native blocked counter는 root TUI session에서만 처리합니다.
-- 소켓·응답·protocol validation·JSON serialization·queue 오류는 observer 출력만 잃으며 Pi lifecycle을 실패시키지 않습니다. 일반 lifecycle/metadata 요청은 최대 두 번 시도하며, 두 시도의 연결/응답 timeout은 `PI_HERDR_PRESENCE_TIMEOUT_MS`를 반씩 사용합니다(기본 500ms + 500ms). 사용자에게 이미 보였는지 알 수 없는 `notification.show`와 teardown의 clear/release는 각각 한 번만 시도하며 재시도하지 않습니다.
-- 기본 알림은 actionable-only입니다. 오류, 새 input-needed lifecycle, 새 native/general blocked 전환만 알리고 start/progress/30초 long-running/replay/보통 성공 완료는 pane state·metadata만 갱신합니다. 기존의 더 넓은 알림은 명시적 `PI_HERDR_PRESENCE_NOTIFY_POLICY` 고급 설정으로만 켤 수 있습니다.
-- `pi-subagent`는 import하지 않는 generic producer이며 source generation/sequence fence와 고정 terminal coalescing window로 처리합니다. external attention은 semantic transition LRU와 짧은 timer coalescing으로 burst를 하나의 static 알림으로 제한합니다. 선택 summary companion은 task/output/path를 복사하지 않는 bounded pane metadata만 만듭니다.
-- command, skill, prompt, LLM-callable tool은 등록하지 않습니다.
-
-## 문서와 검증
-
-- [설정과 보안 경계](docs/configuration.md)
-- [generic event contract](docs/event-contract.md)
-- [개발 안내](docs/development.md)
-- [기능 소유권](docs/feature-ownership.md)
-- [pi-subagent generic producer integration](docs/pi-subagent-integration.md)
-
-```bash
-bun install
+bun install --frozen-lockfile
 bun run ci
+bun pm pack --dry-run
 ```

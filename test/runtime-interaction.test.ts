@@ -1,287 +1,410 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
+import {
+	EVENT_NAMES,
+	createPresenceProducer,
+	type PresenceProducerHandle,
+	type PresenceSource,
+} from "@pi/presence";
 import { resolvePresenceConfig } from "../src/config.js";
 import { PresenceRuntime } from "../src/runtime.js";
-import { PI_PRESENCE_READY_EVENT, PI_PRESENCE_REMOVE_EVENT, PI_PRESENCE_UPDATE_EVENT } from "../src/events.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
-const pause = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
-const environmentKeys = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"] as const;
-type RuntimeConfig = Partial<ReturnType<typeof resolvePresenceConfig>>;
-
-async function withRuntime(config: RuntimeConfig, run: (runtime: PresenceRuntime, lines: string[]) => Promise<void>) {
-  const dir = await fs.mkdtemp(join(os.tmpdir(), "herdr-interaction-"));
-  const socket = join(dir, "socket");
-  const lines: string[] = [];
-  const server = await fakeSocket(socket, (line) => {
-    lines.push(line);
-    return JSON.stringify({ id: JSON.parse(line).id, result: {} });
-  });
-  const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
-  try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(dir, "missing") });
-    const runtime = new PresenceRuntime({ getAllTools() { return []; }, events: { emit() {} } } as never, { ...resolvePresenceConfig(), ...config });
-    await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
-    await run(runtime, lines);
-    await runtime.shutdownSession();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-    await server.close();
-    await fs.rm(dir, { recursive: true, force: true });
-  }
+type Request = {
+	id: string;
+	method?: string;
+	params?: Record<string, unknown>;
+};
+type H = {
+	runtime: PresenceRuntime;
+	requests: Request[];
+	producer(source: PresenceSource): PresenceProducerHandle;
+};
+const keys = [
+	"HERDR_ENV",
+	"HERDR_SOCKET_PATH",
+	"HERDR_PANE_ID",
+	"PI_CODING_AGENT_DIR",
+] as const;
+const sleep = (ms = 20) =>
+	new Promise<void>((done) => setTimeout(done, ms));
+let previous = Promise.resolve();
+function serial(name: string, run: () => Promise<void>) {
+	let release!: () => void;
+	const mine = new Promise<void>((done) => {
+		release = done;
+	});
+	const prior = previous;
+	previous = mine;
+	test(name, async () => {
+		await prior;
+		try {
+			await run();
+		} finally {
+			release();
+		}
+	});
 }
-
-const interaction = (sequence: number, attention: "none" | "info" = "info") => ({
-  version: 1 as const,
-  sessionId: "session",
-  generation: 1,
-  sequence,
-  source: { id: "opaque-interaction", label: "secret prompt /private/path", kind: "interaction" },
-  state: "waiting" as const,
-  counts: { active: 0, completed: 0, failed: 0 },
-  attention,
+async function eventually(assertion: () => void) {
+	let error: unknown;
+	for (let i = 0; i < 50; i += 1) {
+		try {
+			assertion();
+			return;
+		} catch (caught) {
+			error = caught;
+		}
+		await sleep();
+	}
+	throw error;
+}
+function bus() {
+	const listeners = new Map<
+		string,
+		Array<(value: unknown) => void>
+	>();
+	return {
+		on(name: string, listener: (value: unknown) => void) {
+			listeners.set(name, [
+				...(listeners.get(name) ?? []),
+				listener,
+			]);
+		},
+		emit(name: string, value: unknown) {
+			for (const listener of listeners.get(name) ?? [])
+				listener(value);
+		},
+	};
+}
+async function withRuntime(
+	config: Partial<ReturnType<typeof resolvePresenceConfig>>,
+	run: (h: H) => Promise<void>,
+	before?: (h: H) => void,
+) {
+	const dir = await fs.mkdtemp(
+		join(os.tmpdir(), "herdr-v2-input-"),
+	);
+	const socket = join(dir, "socket");
+	const requests: Request[] = [];
+	const server = await fakeSocket(socket, (line) => {
+		const request = JSON.parse(line) as Request;
+		requests.push(request);
+		return JSON.stringify({
+			id: request.id,
+			result: {},
+		});
+	});
+	const saved = Object.fromEntries(
+		keys.map((key) => [
+			key,
+			process.env[key],
+		]),
+	);
+	const events = bus();
+	const producers: PresenceProducerHandle[] = [];
+	let runtime: PresenceRuntime | undefined;
+	try {
+		Object.assign(process.env, {
+			HERDR_ENV: "1",
+			HERDR_SOCKET_PATH: socket,
+			HERDR_PANE_ID: "pane",
+			PI_CODING_AGENT_DIR: join(dir, "absent"),
+		});
+		runtime = new PresenceRuntime(
+			{
+				getAllTools: () => [],
+				events,
+			} as never,
+			{
+				...{ ...resolvePresenceConfig(), soleReporter: true },
+				maxQueue: 128,
+				...config,
+			},
+		);
+		const currentRuntime = runtime;
+		for (const name of [
+			EVENT_NAMES.state,
+			EVENT_NAMES.terminal,
+			EVENT_NAMES.withdraw,
+		])
+			events.on(name, (payload) =>
+				currentRuntime.handlePresenceEvent(name, payload),
+			);
+		const h: H = {
+			runtime: currentRuntime,
+			requests,
+			producer(source) {
+				const producer = createPresenceProducer({
+					source,
+					emit: events.emit,
+				});
+				if (!producer || !producer.activate())
+					throw new Error(`Cannot activate ${source}.`);
+				producers.push(producer);
+				return producer;
+			},
+		};
+		before?.(h);
+		await runtime.startSession({
+			mode: "tui",
+			sessionManager: {
+				getSessionId: () => "session",
+			},
+		});
+		await run(h);
+	} finally {
+		try {
+			if (runtime) await runtime.shutdownSession((runtime as unknown as { context: object }).context);
+		} finally {
+			for (const producer of producers) producer.deactivate();
+		}
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await server.close();
+		await fs.rm(dir, {
+			recursive: true,
+			force: true,
+		});
+	}
+}
+const notices = (requests: Request[]) =>
+	requests.filter(
+		(request) => request.method === "notification.show",
+	);
+const tokens = (request: Request) =>
+	request.params?.tokens as Record<string, string | null>;
+const reports = (requests: Request[]) =>
+	requests.filter(
+		(request) => request.method === "pane.report_agent",
+	);
+const metas = (requests: Request[]) =>
+	requests.filter(
+		(request) => request.method === "pane.report_metadata",
+	);
+const input = (sequence: number, generation = 1) => ({
+	version: 2 as const,
+	generation,
+	sequence,
+	source: "interaction" as const,
+	state: "waiting" as const,
+	interaction: {
+		kind: "ask_user" as const,
+		pending: 1,
+	},
+	attention: {
+		reason: "input_required" as const,
+		occurrence: "new" as const,
+	},
+});
+const failure = (sequence: number, generation = 1) => ({
+	version: 2 as const,
+	generation,
+	sequence,
+	source: "subagent" as const,
+	state: "error" as const,
+	attention: {
+		reason: "failure" as const,
+		occurrence: "new" as const,
+	},
 });
 
-const error = (sequence: number) => ({
-  version: 1 as const,
-  sessionId: "session",
-  generation: 1,
-  sequence,
-  source: { id: "opaque-error", label: "private error", kind: "task" },
-  state: "error" as const,
-  counts: { active: 0, completed: 0, failed: 1 },
-  attention: "error" as const,
-});
+describe.serial("V2 interaction runtime", () => {
+serial(
+	"interaction waiting is blocked, private, and projects typed attention",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			expect(
+				producer("interaction").publishState(input(1)),
+			).toBe(true);
+			await eventually(() =>
+				expect(reports(requests).at(-1)?.params).toMatchObject({
+					state: "blocked",
+					message: "Pi needs your input",
+				}),
+			);
+			expect(metas(requests).some((request) => tokens(request).v2_attention === "input_required:new" && tokens(request).v2_interaction === "ask_user:1")).toBe(true);
+			expect(notices(requests)).toHaveLength(1);
+			expect(JSON.stringify(requests)).not.toContain(
+				"private",
+			);
+		}),
+);
+serial("retained interaction is quiet", async () =>
+	withRuntime(
+		{
+			notificationPolicy: "all",
+		},
+		async ({ requests }) => {
+			await eventually(() =>
+				expect(
+					reports(requests).at(-1)?.params,
+				).toMatchObject({
+					state: "blocked",
+				}),
+			);
+			expect(notices(requests)).toHaveLength(0);
+		},
+		({ producer }) => {
+			producer("interaction").publishState(input(1));
+		},
+	),
+);
+serial(
+	"notification policy and kill switch preserve typed input projection",
+	async () => {
+		const projections: Array<Record<string, string | null>> = [];
+		for (const config of [{ notificationPolicy: "all" as const }, { notificationPolicy: "disabled" as const }, { notifications: false }]) {
+			await withRuntime(config, async ({ producer, requests }) => {
+				producer("interaction").publishState(input(1));
+				await eventually(() => expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true));
+				projections.push(metas(requests).map(tokens).find((value) => value.v2_interaction === "ask_user:1")!);
+				expect(notices(requests)).toHaveLength(config.notificationPolicy === "all" ? 1 : 0);
+			});
+		}
+		expect(projections[0]).toEqual(projections[1]);
+		expect(projections[1]).toEqual(projections[2]);
+	},
+);
+serial("higher sequence preserves one typed interaction projection", async () =>
+	withRuntime({}, async ({ producer, requests }) => {
+		const p = producer("interaction");
+		p.publishState(input(1));
+		p.publishState(input(2));
+		await eventually(() =>
+			expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true),
+		);
+		expect(notices(requests)).toHaveLength(1);
+	}),
+);
+serial(
+	"withdrawal and new generation re-enter typed input lifecycle",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			const p = producer("interaction");
+			p.publishState(input(1));
+			await eventually(() =>
+				expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true),
+			);
+			p.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			p.publishState(input(1, 2));
+			await eventually(() =>
+				expect(metas(requests).filter((request) => tokens(request).v2_interaction === "ask_user:1").length).toBeGreaterThan(1),
+			);
+			expect(notices(requests)).toHaveLength(2);
+		}),
+);
+serial(
+	"input_required takes precedence over retained failure",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			const i = producer("interaction");
+			const s = producer("subagent");
+			i.publishState(input(1));
+			await eventually(() =>
+				expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true),
+			);
+			s.publishState(failure(1));
+			await sleep(80);
+			expect(notices(requests)).toHaveLength(2);
+			expect(
+				reports(requests).at(-1)?.params,
+			).toMatchObject({
+				message: "Pi needs your input",
+			});
+			s.withdraw({
+				version: 2,
+				generation: 1,
+				sequence: 2,
+				source: "subagent",
+			});
+			await eventually(() =>
+				expect(
+					reports(requests).at(-1)?.params,
+				).toMatchObject({
+					message: "Pi needs your input",
+				}),
+			);
+		}),
+);
+serial(
+	"metadata emits exactly nine interaction and attention tokens",
+	async () =>
+		withRuntime(
+			{
+				notificationPolicy: "disabled",
+			},
+			async ({ producer, requests }) => {
+				const i = producer("interaction");
+				const s = producer("subagent");
+				i.publishState(input(1));
+				s.publishState({
+					version: 2,
+					generation: 1,
+					sequence: 1,
+					source: "subagent",
+					state: "running",
+					progress: {
+						completed: 2,
+						total: 5,
+					},
+					subagents: {
+						running: 1,
+						cancelling: 2,
+						queued: 3,
+						completed: 4,
+						failed: 5,
+						cancelled: 6,
+						omitted: 7,
+					},
+				});
+				s.publishTerminal({
+					version: 2,
+					generation: 1,
+					sequence: 2,
+					source: "subagent",
+					eventId: 9,
+					outcome: "completed",
+				});
+				await eventually(() =>
+					expect(
+						metas(requests).some(
+							(r) =>
+								(r.params?.tokens as Record<string, string>)
+									?.v2_terminals ===
+								"subagent:1:9:completed",
+						),
+					).toBe(true),
+				);
+				const t = metas(requests)
+					.map(
+						(r) =>
+							r.params?.tokens as Record<string, string>,
+					)
+					.find((v) => v.v2_terminals);
+				expect(t).toBeDefined();
+				expect(Object.keys(t!)).toEqual([
+					"v2_progress",
+					"v2_attention",
+					"v2_interaction",
+					"v2_subagents",
+					"v2_terminals",
+					"v2_terminal_overflow",
+					"tokens",
+					"cost",
+					"context",
+				]);
+				expect(t).toMatchObject({
+					v2_progress: "2/5",
+					v2_attention: "input_required:new",
+					v2_interaction: "ask_user:1",
+					v2_subagents: "1,2,3,4,5,6,7",
+				});
+			},
+		),
+);
 
-const remove = (id: string, sequence: number) => ({ version: 1 as const, sessionId: "session", generation: 1, sequence, source: { id } });
-const notifications = (lines: string[]) => lines.map((line) => JSON.parse(line)).filter((request) => request.method === "notification.show");
-const lastReport = (lines: string[]) => lines.map((line) => JSON.parse(line)).filter((request) => request.method === "pane.report_agent").at(-1);
-
-test("interaction waiting/info is blocked, input-needed, private, and requests notification sound", async () => {
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    await pause();
-    const requests = lines.map((line) => JSON.parse(line));
-    const report = requests.filter((request) => request.method === "pane.report_agent").at(-1);
-    const notification = requests.find((request) => request.method === "notification.show");
-    const reportMetadata = requests.filter((request) => request.method === "pane.report_metadata").at(-1);
-    expect(report.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
-    expect(reportMetadata.params).toMatchObject({ title: "Pi · Input needed", state_labels: { blocked: "Input needed" } });
-    expect(notification.params).toEqual({ title: "Pi needs your input", body: "Pi needs your input", sound: "request" });
-    expect(JSON.stringify(requests)).not.toContain("secret prompt");
-    expect(JSON.stringify(requests)).not.toContain("/private/path");
-  });
-});
-
-test("ordinary waiting/info remains working with the generic done notification", async () => {
-  await withRuntime({ notificationPolicy: "background" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate({ ...interaction(1), source: { id: "ordinary", label: "opaque", kind: "task" } });
-    await pause();
-    const requests = lines.map((line) => JSON.parse(line));
-    const report = requests.filter((request) => request.method === "pane.report_agent").at(-1);
-    const notification = requests.find((request) => request.method === "notification.show");
-    expect(report.params).toMatchObject({ state: "working", message: "Pi is working" });
-    expect(notification.params).toEqual({ title: "Pi update", body: "Pi activity completed", sound: "done" });
-  });
-});
-
-test("interaction notifications remain subject to policy, kill switch, and dedupe", async () => {
-  await withRuntime({ notificationPolicy: "disabled" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    await pause();
-    expect(notifications(lines)).toHaveLength(0);
-  });
-  await withRuntime({ notifications: false, notificationPolicy: "all" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    await pause();
-    expect(notifications(lines)).toHaveLength(0);
-  });
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    const event = interaction(1);
-    runtime.handlePresenceUpdate(event);
-    (runtime as unknown as { render(attention: typeof event): void }).render(event);
-    await pause();
-    expect(notifications(lines)).toHaveLength(1);
-  });
-});
-
-test("same-state higher sequences do not re-alert, but exit and re-entry do", async () => {
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    runtime.handlePresenceUpdate(interaction(2));
-    await pause();
-    expect(notifications(lines)).toHaveLength(1);
-    runtime.handlePresenceRemove(remove("opaque-interaction", 3));
-    runtime.handlePresenceUpdate(interaction(4));
-    await pause();
-    expect(notifications(lines)).toHaveLength(2);
-  });
-});
-
-test("a consumer-less ready request restores retained interaction state and a later remove releases it", async () => {
-  const dir = await fs.mkdtemp(join(os.tmpdir(), "herdr-ready-replay-"));
-  const socket = join(dir, "socket");
-  const lines: string[] = [];
-  const server = await fakeSocket(socket, (line) => {
-    lines.push(line);
-    return JSON.stringify({ id: JSON.parse(line).id, result: {} });
-  });
-  const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
-  try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(dir, "missing") });
-    const listeners = new Map<string, Array<(payload: unknown) => void>>();
-    const pi = {
-      getAllTools() { return []; },
-      events: {
-        on(name: string, listener: (payload: unknown) => void) { const group = listeners.get(name) ?? []; group.push(listener); listeners.set(name, group); },
-        emit(name: string, payload: unknown) { for (const listener of listeners.get(name) ?? []) listener(payload); },
-      },
-    };
-    const runtime = new PresenceRuntime(pi as never, resolvePresenceConfig());
-    pi.events.on(PI_PRESENCE_UPDATE_EVENT, (payload) => runtime.handlePresenceUpdate(payload));
-    pi.events.on(PI_PRESENCE_REMOVE_EVENT, (payload) => runtime.handlePresenceRemove(payload));
-    pi.events.on(PI_PRESENCE_READY_EVENT, (payload) => runtime.handleReady(payload));
-    let replayed = false;
-    pi.events.on(PI_PRESENCE_READY_EVENT, (payload) => {
-      if ((payload as { sessionId?: unknown; consumer?: unknown }).sessionId === "session" && !("consumer" in (payload as object))) {
-        replayed = true;
-        pi.events.emit(PI_PRESENCE_UPDATE_EVENT, interaction(1, "none"));
-      }
-    });
-    await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
-    await pause();
-    expect(replayed).toBe(true);
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
-    pi.events.emit(PI_PRESENCE_REMOVE_EVENT, remove("opaque-interaction", 2));
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "idle", message: "Pi is idle" });
-    await runtime.shutdownSession();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-    await server.close();
-    await fs.rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("silent replay alerts once on the first live input and rearms only after release", async () => {
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1, "none"));
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
-    runtime.handlePresenceUpdate(interaction(2));
-    runtime.handleBlocked({ active: true, label: "ask-user" });
-    await pause();
-    expect(notifications(lines)).toHaveLength(1);
-
-    runtime.handleBlocked({ active: false });
-    runtime.handlePresenceRemove(remove("opaque-interaction", 3));
-    runtime.handlePresenceUpdate(interaction(4));
-    await pause();
-    expect(notifications(lines)).toHaveLength(2);
-  });
-});
-
-test("error precedence changes wording but does not reset retained input lifecycle", async () => {
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    await pause();
-    runtime.handlePresenceUpdate(error(1));
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs attention" });
-    expect(notifications(lines)).toHaveLength(2);
-    runtime.handlePresenceRemove(remove("opaque-error", 2));
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
-    expect(notifications(lines)).toHaveLength(2);
-  });
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(error(1));
-    await pause();
-    runtime.handlePresenceUpdate(interaction(1));
-    runtime.handlePresenceUpdate(interaction(2, "none"));
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs attention" });
-    expect(notifications(lines)).toHaveLength(1);
-    runtime.handlePresenceRemove(remove("opaque-error", 2));
-    await pause();
-    expect(notifications(lines)).toHaveLength(2);
-  });
-});
-
-test("native general-block precedence does not reset a retained input lifecycle", async () => {
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    await pause();
-    runtime.handleBlocked({ active: true, label: "other native block" });
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs attention" });
-    expect(notifications(lines)).toHaveLength(2);
-    runtime.handleBlocked({ active: false });
-    await pause();
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
-    expect(notifications(lines)).toHaveLength(2);
-
-    runtime.handlePresenceRemove(remove("opaque-interaction", 2));
-    runtime.handlePresenceUpdate(interaction(3));
-    await pause();
-    expect(notifications(lines)).toHaveLength(3);
-  });
-});
-
-test("sticky native categories and errors take precedence over input wording", async () => {
-  await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-    runtime.handlePresenceUpdate(interaction(1));
-    runtime.handleBlocked({ active: true, label: "ask-user" });
-    runtime.handleBlocked({ active: true, label: "secret general label" });
-    runtime.handleBlocked({ active: false });
-    await pause();
-    let requests = lines.map((line) => JSON.parse(line));
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs attention" });
-    expect(requests.filter((request) => request.method === "pane.report_metadata").at(-1).params).toMatchObject({ title: "Pi · Needs attention", state_labels: { blocked: "Needs attention" } });
-
-    runtime.handleBlocked({ active: false });
-    runtime.handlePresenceUpdate(error(2));
-    await pause();
-    requests = lines.map((line) => JSON.parse(line));
-    expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs attention" });
-    expect(JSON.stringify(requests)).not.toContain("secret general label");
-    expect(JSON.stringify(requests)).not.toContain("private error");
-  });
-});
-
-test("generic and native ask-user signals dedupe in either arrival and release order", async () => {
-  for (const genericFirst of [true, false]) {
-    await withRuntime({ notificationPolicy: "errors" }, async (runtime, lines) => {
-      if (genericFirst) {
-        runtime.handlePresenceUpdate(interaction(1));
-        runtime.handleBlocked({ active: true, label: "ask-user" });
-      } else {
-        runtime.handleBlocked({ active: true, label: "ask-user" });
-        runtime.handlePresenceUpdate(interaction(1));
-      }
-      await pause();
-      expect(notifications(lines)).toHaveLength(1);
-      expect(notifications(lines)[0].params).toEqual({ title: "Pi needs your input", body: "Pi needs your input", sound: "request" });
-
-      if (genericFirst) runtime.handlePresenceRemove(remove("opaque-interaction", 2));
-      else runtime.handleBlocked({ active: false });
-      await pause();
-      expect(lastReport(lines).params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
-
-      if (genericFirst) runtime.handleBlocked({ active: false });
-      else runtime.handlePresenceRemove(remove("opaque-interaction", 2));
-      await pause();
-      expect(lastReport(lines).params.state).toBe("idle");
-
-      runtime.handlePresenceUpdate(interaction(3));
-      await pause();
-      expect(notifications(lines)).toHaveLength(2);
-    });
-  }
 });

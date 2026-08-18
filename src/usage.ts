@@ -1,26 +1,23 @@
-import type { PresenceUsage } from "./events.js";
+type PresenceUsage = { tokens?: number; cost?: number; contextPercent?: number };
 
 interface UsageLike { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; totalTokens?: unknown; cost?: unknown; }
-function number(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0; }
+const LIMIT = 1_000_000;
+function number(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(LIMIT, value) : 0; }
 function percent(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100 ? value : undefined; }
-function cost(value: unknown): number {
-  if (typeof value === "number") return number(value);
-  if (typeof value === "object" && value !== null) return number((value as { total?: unknown }).total);
-  return 0;
-}
+function cost(value: unknown): number { return typeof value === "number" ? number(value) : typeof value === "object" && value !== null ? number((value as { total?: unknown }).total) : 0; }
 
+/** Aggregate only approved numeric usage; snapshots are bounded for wire projection. */
 export class UsageTracker {
   private tokens = 0;
   private reportedCost = 0;
   private contextPercent: number | undefined;
 
-  /** Add one assistant message usage delta; repeated calls accumulate per-message values. */
   add(value: unknown): void {
     if (typeof value !== "object" || value === null) return;
     const usage = value as UsageLike;
     const total = number(usage.totalTokens);
-    this.tokens += total || number(usage.input) + number(usage.output) + number(usage.cacheRead) + number(usage.cacheWrite);
-    this.reportedCost += cost(usage.cost);
+    this.tokens = Math.min(LIMIT, this.tokens + (total || number(usage.input) + number(usage.output) + number(usage.cacheRead) + number(usage.cacheWrite)));
+    this.reportedCost = Math.min(LIMIT, this.reportedCost + cost(usage.cost));
   }
   setContext(value: unknown): void {
     if (typeof value !== "object" || value === null) return;
