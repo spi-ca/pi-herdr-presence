@@ -1,13 +1,11 @@
-# 기능 소유권
+# Lifecycle, privacy, and ownership
 
-| 기능 | pi-herdr-presence | Herdr managed Pi integration | generic producer |
-| --- | --- | --- | --- |
-| Pi session reference | `herdr:pi` native session report | 설치 시 소유 | 없음 |
-| state/metadata/release | `herdr:pi` / `pi` | 설치 시 소유 | state publish만 |
-| external presence render | retained update/remove contract | 별도 구현 | state publish |
-| agent execution/cancel | 없음 | 없음 | producer 소유 |
-| teardown | true title/display/label clear와 15개 metadata token—`active`, `completed`, `failed`, `queued`, `cancelled`, `total`, `progress`, `tokens`, `cost`, `context`, `subagents`, `subagent_wait`, `subagent_error`, `subagent_terminal`, `subagent_terminal_at`—null patch, priority `herdr:pi` release, close를 단일 deadline 안에서 best-effort 수행 | own source | 없음 |
+`pi-herdr-presence` owns one local Herdr authority only when `PI_HERDR_PRESENCE_SOLE_REPORTER=1` is explicitly set and the managed Pi asset is proven absent by an exact `ENOENT`. Before reporting that authority it clears stale current and legacy metadata; it then reports the Pi session, pane state, and fixed metadata projection as `source: "herdr:pi"`, `agent: "pi"`. Teardown clears current metadata and legacy metadata within one aggregate deadline. Only if time remains does it make at most one non-retried `pane.clear_agent_authority` attempt with only `pane_id`, `source: "herdr:pi"`, and `seq`; it may make no remote authority-clear attempt when the cleanup deadline expires.
 
-이 extension은 lifecycle authority를 분리하지 않습니다. native session report, state, metadata (`applies_to_source` 포함), clear, release 모두 `source: "herdr:pi"`, `agent: "pi"`입니다.
+A managed `herdr-agent-state.ts` owns that authority instead. The extension checks it without executing it and fail-closes for every result other than exact managed-asset `ENOENT`, including present, unreadable, malformed, ambiguous, unsafe, or timed-out probes. It does not modify, replace, or coexist with the managed integration.
 
-두 Pi reporter가 같은 pane authority를 경쟁할 수 있으므로 이 package는 managed asset 파일이 있으면 marker 유무와 관계없이 fail-closed 합니다. probe failure도 `unknown`이며, **ENOENT 파일 부재만** local authority를 허용합니다. 이 경우 외에는 local event advertisement/replay, retained session, socket client를 만들지 않습니다.
+The extension listens to the shared V2 event bus after installing its listeners and before activating its consumer. Shared producer lifecycle, delivery receipts, generation/sequence fences, withdrawal, and terminal semantics remain defined by the immutable [canonical V2 lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md) and [protocol API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md).
+
+Within one Bun JS realm, the process-global coordinator serializes extension-owned authority startup and teardown, probe/socket unresolved leases, and Herdr sequence allocation across reloads and forks. Lifecycle callbacks initiate that work detached: shutdown invalidates ownership and reserves old cleanup before a later startup can claim authority, while a late old-generation shutdown closes only its local client. Same-realm extensions are trusted code; this coordinator is neither cross-process locking nor an authentication, authorization, or sandbox boundary.
+
+Only count/value projections and fixed presentation strings enter Herdr. Session IDs are bounded; no session path, task, prompt, tool argument/output, arbitrary producer ID, or error text is sent. This extension owns bounded static alerts for live terminal failures and V2 `attention.reason` values of `blocked`, `input_required`, or `failure` when its notification policy permits them; retained replay is never alerted.

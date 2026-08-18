@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { boundedPresenceText, normalizePresenceText } from "../src/text.js";
-import { attentionText, metadata } from "../src/presentation.js";
-test("text normalization preserves destination bounds without unsafe controls",()=>{const value=boundedPresenceText("😀".repeat(100),{maxBytes:128,maxCodePoints:32});expect(Buffer.byteLength(value,"utf8")).toBeLessThanOrEqual(128);expect([...value]).toHaveLength(32);expect(value.endsWith("…")).toBe(true);expect(normalizePresenceText(" safe\u202e text ")).toBe("safe text");});
-test("presentation never copies producer text into static metadata or notification",()=>{const event={version:1 as const,sessionId:"s",generation:1,sequence:1,source:{id:"x",label:"secret /private/path",kind:"task"},state:"error" as const,counts:{active:0,completed:0,failed:1},attention:"error" as const};expect(JSON.stringify(metadata([event],"blocked",96))).not.toContain("secret");expect(attentionText(event,96)?.body).not.toContain("secret");});
+import { boundedPresenceText } from "../src/text.js";
+test("text is byte bounded",()=>expect(Buffer.byteLength(boundedPresenceText("😀".repeat(200),{maxBytes:128,maxCodePoints:96}),"utf8")).toBeLessThanOrEqual(128));
+test("text is codepoint bounded",()=>expect([...boundedPresenceText("x".repeat(200),{maxBytes:128,maxCodePoints:96})]).toHaveLength(96));
+test("text strips controls",()=>expect(boundedPresenceText("ok\u0000bad",{maxBytes:128,maxCodePoints:96})).toBe("ok bad"));
+test("text has deterministic fallback",()=>expect(boundedPresenceText("",{maxBytes:128,maxCodePoints:96})).toBe("presence"));

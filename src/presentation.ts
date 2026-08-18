@@ -1,37 +1,103 @@
-import type { PresenceUpdate } from "./events.js";
-import type { SubagentSummary } from "./subagent-summary.js";
+import type { PresenceStateV2, Subagents, TerminalBatch } from "@pi/presence";
+import { HERDR_FIXED_PRESENTATION, type HerdrMetadataTokens, type HerdrPresentation } from "./protocol.js";
 import { boundedPresenceText } from "./text.js";
+
 export type HerdrState = "idle" | "working" | "blocked" | "unknown";
 export type BlockedCategory = "ask-user" | "blocked";
-const LOCAL: Record<PresenceUpdate["state"],string>={idle:"Idle",waiting:"Waiting",running:"Working",success:"Done",error:"Needs attention",cancelled:"Cancelled"};
-/** Retained interaction state blocks even when a replay intentionally clears attention. */
-export function isInteractionWaiting(event:PresenceUpdate):boolean{return event.source.kind==="interaction"&&event.state==="waiting";}
-/** Only a live info update is eligible to notify; replays with attention:none are silent. */
-export function isLiveInputRequest(event:PresenceUpdate):boolean{return isInteractionWaiting(event)&&event.attention==="info";}
-export function blockedPresentationCategory(events:readonly PresenceUpdate[],nativeCategory?:BlockedCategory):BlockedCategory {if(events.some(e=>e.state==="error"||e.attention==="error")||nativeCategory==="blocked")return "blocked";return nativeCategory==="ask-user"||events.some(isInteractionWaiting)?"ask-user":"blocked";}
-const isSubagent=(event:PresenceUpdate)=>event.source.id==="pi-subagent";
-const hasError=(event:PresenceUpdate)=>event.state==="error"||event.attention==="error";
-function subagentEvent(events:readonly PresenceUpdate[]){return events.find(isSubagent);}
-/** Only the exact aggregate producer may affect parent subagent presentation. */
-function subagentStatus(events:readonly PresenceUpdate[],summary:SubagentSummary|null){const event=subagentEvent(events);if(!event&&!summary)return null;const active=event?.counts.active??(summary?summary.active.length+summary.omitted:0);const queued=event?.counts.queued??(summary?.waiting?.category==="queued"?summary.waiting.count:0);const cancelling=event?.state==="cancelled"||summary?.active.some(item=>item.category==="cancelling")===true||summary?.waiting?.category==="cancelling";const failed=event!==undefined&&hasError(event)||summary?.terminal?.status==="failed";return {active,queued,cancelling,failed};}
-function hasHigherPriorityIssue(events:readonly PresenceUpdate[],nativeCategory?:BlockedCategory){return nativeCategory==="blocked"||events.some(event=>!isSubagent(event)&&(hasError(event)||isInteractionWaiting(event)));}
-export function compositeState(events: readonly PresenceUpdate[], active: boolean, locallyBlocked=false): HerdrState { if(locallyBlocked || events.some(event=>!isSubagent(event)&&hasError(event)))return "blocked"; if(events.some(isInteractionWaiting))return "blocked"; if(active || events.some(e=>e.state==="running" || e.state==="waiting"))return "working"; if(events.some(event=>isSubagent(event)&&hasError(event)))return "blocked"; return "idle"; }
-/** Native blocked labels are never forwarded: only an allowlisted category selects wording. */
-export function safeMessage(state:HerdrState,max:number,blockedCategory?:BlockedCategory,events:readonly PresenceUpdate[]=[],summary:SubagentSummary|null=null,parentActive=false):string { const category=blockedPresentationCategory(events,blockedCategory);const subagents=subagentStatus(events,summary);const text=state==="blocked" ? (subagents?.failed&&!hasHigherPriorityIssue(events,blockedCategory)?"Subagent needs attention":category==="ask-user"?"Pi needs your input":"Pi needs attention") : state==="working"&&parentActive ? "Pi is working" : state==="working"&&subagents ? (subagents.cancelling?"Subagents are stopping":subagents.active>0?"Subagents are working":subagents.queued>0?"Subagents are queued":"Pi is working") : state==="working" ? "Pi is working" : state==="idle" ? "Pi is idle" : "Pi state unknown";return boundedPresenceText(text,{maxBytes:128,maxCodePoints:max}); }
-function summaryTokens(summary: SubagentSummary | null): Record<string,string|null> {
- if (!summary) return {subagents:null,subagent_wait:null,subagent_error:null,subagent_terminal:null,subagent_terminal_at:null};
- const total=summary.active.length+summary.omitted;
- const terminalDate=summary.terminal ? new Date(summary.terminal.completedAt) : null;
- const terminalAt=terminalDate && Number.isFinite(terminalDate.getTime()) ? terminalDate.toISOString() : null;
- return {
-  subagents:String(total),
-  subagent_wait:summary.waiting ? `${summary.waiting.category}:${summary.waiting.count}` : null,
-  subagent_error:summary.terminal?.status === "failed" ? "1" : null,
-  subagent_terminal:summary.terminal?.status ?? null,
-  subagent_terminal_at:terminalAt,
- };
+type Usage = { tokens?: number; cost?: number; contextPercent?: number } | undefined;
+
+const LIMIT = 1_000_000;
+const count = (value: unknown): number | undefined => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= LIMIT ? value : undefined;
+/** Decimal only, no exponent/sign/trailing zero ambiguity, and capped to the shared numeric budget. */
+function decimal(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > LIMIT) return null;
+  const result = Number.isInteger(value) ? String(value) : value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+  return /^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/.test(result) && result.length <= 16 ? result : null;
 }
-/** Metadata is deliberately count/category-only; companion task, agent, and identifier fields never reach Herdr. */
-export function metadata(events:readonly PresenceUpdate[], state:HerdrState,max:number,summary:SubagentSummary|null=null,blockedCategory?:BlockedCategory,parentActive=false){ const count=(k:keyof PresenceUpdate["counts"])=>events.reduce((n,e)=>n+(typeof e.counts[k]==="number"?e.counts[k] as number:0),0);const tokens=events.reduce((n,e)=>n+(e.usage?.tokens??0),0);const cost=events.reduce((n,e)=>n+(e.usage?.cost??0),0);const context=Math.max(0,...events.map(e=>e.usage?.contextPercent??0));const progress=events.find(e=>e.source.id==="pi-todo"&&e.progress)??events.find(e=>e.progress&&(e.state==="running"||e.state==="waiting")); const category=blockedPresentationCategory(events,blockedCategory);const labels:Record<string,string>={idle:"Idle",working:"Working",blocked:category==="ask-user"?"Input needed":"Needs attention",unknown:"Unknown"};const subagents=subagentStatus(events,summary);const subagentTitle=subagents&&!parentActive&&!hasHigherPriorityIssue(events,blockedCategory)?subagents.failed?"Pi · Subagent failed":subagents.cancelling?"Pi · Subagents stopping":subagents.active>0&&subagents.queued>0?`Pi · ${subagents.active} running · ${subagents.queued} queued`:subagents.active>0?`Pi · ${subagents.active} running`:subagents.queued>0?`Pi · ${subagents.queued} queued`:summary?`Pi · ${summary.active.length+summary.omitted} subagents`:null:null; return {title:boundedPresenceText(subagentTitle??`Pi · ${labels[state]}`,{maxBytes:128,maxCodePoints:max}),displayAgent:"Pi",labels,tokens:{active:String(count("active")),completed:String(count("completed")),failed:String(count("failed")),queued:String(count("queued")),cancelled:String(count("cancelled")),total:String(count("total")),progress:progress?.progress?`${Math.round(progress.progress.value*100)}%`:null,tokens:tokens?String(Math.round(tokens)):null,cost:cost?cost.toFixed(2):null,context:context?`${Math.round(context)}%`:null,...summaryTokens(summary)}}; }
-export function attentionText(event:PresenceUpdate,max:number):{title:string;body:string;error:boolean;inputNeeded:boolean}|null { if(event.attention!=="error"&&event.attention!=="success"&&event.attention!=="info")return null; const inputNeeded=isLiveInputRequest(event);const error=event.attention==="error"; return {title:boundedPresenceText(inputNeeded?"Pi needs your input":error?"Pi needs attention":"Pi update",{maxBytes:128,maxCodePoints:max}),body:boundedPresenceText(inputNeeded?"Pi needs your input":error?"A Pi task needs attention":"Pi activity completed",{maxBytes:512,maxCodePoints:max}),error,inputNeeded}; }
-export function localStateText(state:PresenceUpdate["state"],max:number){return boundedPresenceText(LOCAL[state],{maxBytes:128,maxCodePoints:max});}
+
+export function isInteractionWaiting(event: PresenceStateV2): boolean {
+  return event.source === "interaction" && event.state === "waiting" && event.interaction?.kind === "ask_user" && event.interaction.pending > 0;
+}
+export function isLiveInputRequest(event: PresenceStateV2): boolean {
+  return isInteractionWaiting(event) && event.attention?.reason === "input_required" && event.attention.occurrence === "new";
+}
+const hasFailure = (event: PresenceStateV2) => event.state === "error" || event.attention?.reason === "failure";
+const hasBlockedAttention = (event: PresenceStateV2) => event.attention?.reason === "blocked";
+const sourceOrder: Record<PresenceStateV2["source"], number> = { interaction: 0, pi: 1, subagent: 2, todo: 3 };
+const attentionReasonOrder: Record<string, number> = { input_required: 0, failure: 1, blocked: 2 };
+const attentionOccurrenceOrder: Record<string, number> = { new: 0, retained: 1 };
+const compareAttention = (left: PresenceStateV2, right: PresenceStateV2) =>
+  (attentionReasonOrder[left.attention?.reason ?? ""] ?? 3) - (attentionReasonOrder[right.attention?.reason ?? ""] ?? 3)
+  || (attentionOccurrenceOrder[left.attention?.occurrence ?? ""] ?? 2) - (attentionOccurrenceOrder[right.attention?.occurrence ?? ""] ?? 2)
+  || sourceOrder[left.source] - sourceOrder[right.source]
+  || left.generation - right.generation || left.sequence - right.sequence;
+const progressSourceOrder: Partial<Record<PresenceStateV2["source"], number>> = { todo: 0, subagent: 1, pi: 2 };
+const compareProgress = (left: PresenceStateV2, right: PresenceStateV2) =>
+  (progressSourceOrder[left.source] ?? 3) - (progressSourceOrder[right.source] ?? 3)
+  || sourceOrder[left.source] - sourceOrder[right.source]
+  || left.generation - right.generation || left.sequence - right.sequence;
+const subagents = (events: readonly PresenceStateV2[]): Subagents | undefined => events.find(event => event.source === "subagent")?.subagents;
+
+export function blockedPresentationCategory(events: readonly PresenceStateV2[]): BlockedCategory {
+  return events.some(isInteractionWaiting) ? "ask-user" : "blocked";
+}
+export function compositeState(events: readonly PresenceStateV2[], active: boolean): HerdrState {
+  // Canonical blocked attention remains blocked even when its producer state is
+  // waiting; otherwise a waiting producer could overwrite the fixed pane state.
+  if (events.some(hasFailure) || events.some(hasBlockedAttention) || events.some(isInteractionWaiting)) return "blocked";
+  if (active || events.some(event => event.state === "running" || event.state === "waiting")) return "working";
+  return "idle";
+}
+/** Only fixed, privacy-safe strings reach the primary pane report. */
+export function safeMessage(state: HerdrState, max: number, events: readonly PresenceStateV2[] = [], parentActive = false): string {
+  const aggregate = subagents(events);
+  const category = blockedPresentationCategory(events);
+  const text = state === "blocked"
+    ? category === "ask-user" ? "Pi needs your input" : "Pi needs attention"
+    : state === "working" && parentActive ? "Pi is working"
+    : state === "working" && aggregate?.cancelling ? "Subagents are stopping"
+    : state === "working" && aggregate?.running ? "Subagents are working"
+    : state === "working" && aggregate?.queued ? "Subagents are queued"
+    : state === "working" ? "Pi is working"
+    : state === "idle" ? "Pi is idle" : "Pi state unknown";
+  return boundedPresenceText(text, { maxBytes: 128, maxCodePoints: max });
+}
+
+/** Herdr v8 presentation is deliberately constant: no producer or user text can become pane chrome. */
+export function presentation(): HerdrPresentation { return HERDR_FIXED_PRESENTATION; }
+
+/** Nine fixed V2 keys: every absent datum is explicitly withdrawn with null. */
+export function metadata(events: readonly PresenceStateV2[], terminals?: TerminalBatch, usage?: Usage): HerdrMetadataTokens {
+  const progress = [...events].filter(event => event.progress).sort(compareProgress)[0]?.progress;
+  const attention = [...events].filter(event => event.attention).sort(compareAttention)[0]?.attention;
+  const interaction = events.find(isInteractionWaiting)?.interaction;
+  const aggregate = subagents(events);
+  const progressToken = progress && count(progress.completed) !== undefined && count(progress.total) !== undefined ? `${progress.completed}/${progress.total}` : null;
+  const attentionToken = attention ? `${attention.reason}:${attention.occurrence}` : null;
+  const interactionToken = interaction && count(interaction.pending) !== undefined ? `ask_user:${interaction.pending}` : null;
+  const subagentValues = aggregate && [aggregate.running, aggregate.cancelling, aggregate.queued, aggregate.completed, aggregate.failed, aggregate.cancelled, aggregate.omitted];
+  const subagentToken = subagentValues?.every(value => count(value) !== undefined) ? subagentValues.join(",") : null;
+  return {
+    v2_progress: progressToken,
+    v2_attention: attentionToken,
+    v2_interaction: interactionToken,
+    v2_subagents: subagentToken,
+    v2_terminals: terminals?.value ?? null,
+    v2_terminal_overflow: terminals ? String(terminals.overflow) : null,
+    tokens: decimal(usage?.tokens),
+    cost: decimal(usage?.cost),
+    context: decimal(usage?.contextPercent),
+  };
+}
+export function attentionText(event: PresenceStateV2, max: number): { title: string; body: string; error: boolean; inputNeeded: boolean } | null {
+  const reason = event.attention?.reason;
+  if (!reason || event.attention?.occurrence !== "new") return null;
+  const inputNeeded = isLiveInputRequest(event);
+  const error = reason === "failure" || reason === "blocked";
+  return {
+    title: boundedPresenceText(inputNeeded ? "Pi needs your input" : error ? "Pi needs attention" : "Pi update", { maxBytes: 128, maxCodePoints: max }),
+    body: boundedPresenceText(inputNeeded ? "Pi needs your input" : error ? "A Pi task needs attention" : "Pi activity completed", { maxBytes: 512, maxCodePoints: max }),
+    error,
+    inputNeeded,
+  };
+}

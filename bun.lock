@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "pi-herdr-presence",
+      "dependencies": {
+        "@pi/presence": "github:spi-ca/pi-presence#v2-20260818-2",
+      },
       "devDependencies": {
         "@biomejs/biome": "2.3.14",
         "@earendil-works/pi-coding-agent": "^0.82.0",
@@ -12,11 +15,8 @@
         "typescript": "^5.9.3",
       },
       "peerDependencies": {
-        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-coding-agent": "^0.82.0",
       },
-      "optionalPeers": [
-        "@earendil-works/pi-coding-agent",
-      ],
     },
   },
   "packages": {
@@ -127,6 +127,8 @@
     "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 
     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.43.0", "", {}, "sha512-eSYWTm620tTk45EKSedaUL8MFYI8hW164hIXsgIHyxu3VobUB3fFCu5t0hQby6OoWRPsG1KkKUG2M5UadiLiVg=="],
+
+    "@pi/presence": ["@pi/presence@github:spi-ca/pi-presence#97dc571", {}, "spi-ca-pi-presence-97dc571", "sha512-AhTqn7cw3VkvVbbrZcfWvisCt3AW1W51ou9gCZx4Rl5Qw71qO7hNRjscBVDZtUgkl6KTXT86MI7ejV6u2te1Dg=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

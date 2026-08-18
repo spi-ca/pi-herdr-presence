@@ -1,45 +1,28 @@
-# 개발 안내
+# Development
 
-`bun@1.3.14`를 사용합니다.
+Use `bun@1.3.14`.
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run ci
+bun pm pack --dry-run
 ```
 
-`ci`는 warning을 오류로 처리하는 Biome lint, 타입 검사, 테스트를 순서대로 실행합니다.
+`@pi/presence` is pinned exactly to `github:spi-ca/pi-presence#v2-20260818-2`. Do not use a range, a sibling path dependency, or the retired package name.
 
-GitHub 설치는 다음 명령을 사용합니다.
+The non-optional Pi runtime peer is `@earendil-works/pi-coding-agent` `^0.82.0`. The frozen lock resolves the development range to `0.82.1`; its installed `ExtensionAPI` types declare `on("agent_settled", ...)`. Keep `agent_end` terminal derivation and `agent_settled` settlement as separate callbacks; do not add an event-registration fallback or runtime-version shim.
+
+The extension-specific code is limited to Herdr socket transport, managed-authority detection, lifecycle-to-pane reporting, privacy-safe static presentation, and the fixed nine-token projection. Shared protocol, lifecycle, receipt, fence, and terminal rules are canonical at the immutable [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json). Upstream Herdr and Pi core source, APIs, and UI are out of scope; do not modify or document them as extension deliverables.
+
+Same-JS-realm extensions are trusted arbitrary code. The process coordinator is therefore not an authentication, authorization, or sandbox boundary. Its frozen-descriptor and proxy validation is fail-closed defense against accidental or structural misuse only; do not represent it as protection from an extension that deliberately controls the shared JavaScript realm.
+
+For a socket smoke test with a real Herdr target:
 
 ```bash
-pi install git:github.com/spi-ca/pi-herdr-presence
-# 현재 프로젝트에만 설치
-pi install -l git:github.com/spi-ca/pi-herdr-presence
+HERDR_ENV=1 HERDR_SOCKET_PATH=/path/to/socket HERDR_PANE_ID=pane \
+  PI_HERDR_PRESENCE_SOLE_REPORTER=1 bun test/live-herdr-presence-producers.ts
 ```
 
-로컬 checkout을 개발할 때는 [README](../README.md)처럼 absolute-path `pi install /absolute/path/to/pi-herdr-presence`를 사용하고, 소스 변경 뒤 실행 중인 Pi에서 `/reload`합니다.
+The harness requires the explicit sole-reporter opt-in above and uses an event-driven owner-only temporary proxy. It separately verifies the exact startup order of current clear, legacy clear, session report, agent report, and ordinary metadata. At teardown it verifies current clear and legacy clear, then—only when the aggregate cleanup deadline still permits it—at most one strict `pane.clear_agent_authority` request. It checks exact metadata envelopes, the authority-clear `pane_id`/`source`/`seq` schema, all nine keys, terminal projection, withdrawal, and privacy; it does not poll or invoke a CLI/process.
 
-주요 모듈:
-
-- `identity.ts`: Linux/macOS Herdr env target 및 lexical/resolved Unix socket validation
-- `transport.ts`: request-per-connection NDJSON, timeout, bounded keyed queue와 abortable close
-- `protocol.ts`: UTF-8 byte-bounded Herdr request allowlist와 strict response envelope
-- `runtime.ts`: TUI/session epoch lifecycle, native `herdr:blocked`, retained composite state, summary tombstone, ready fencing, aggregate teardown
-- `subagent-summary.ts`: strict bounded `pi-subagent` summary parser and update/remove fence
-- `events.ts`: generic producer parser, generation/sequence fence, tombstone, bounded source slots
-- `presentation.ts`: safe state/message/metadata/notification renderer
-
-불변 조건:
-
-- Linux/macOS Unix socket만 지원한다. Windows/named-pipe transport를 추가하지 않는다.
-- `HERDR_ENV=1`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` 외 target fallback을 만들지 않는다.
-- process/CLI/shell execution, polling, persistent connection 또는 subscription을 추가하지 않는다.
-- command, skill, prompt, LLM-callable tool을 등록하거나 모델의 기본 context를 확장하지 않는다.
-- raw prompt, response, tool argument/output, file path를 Herdr text에 넣지 않는다.
-- socket, protocol validation, serialization 실패는 observer output만 잃고 Pi lifecycle을 실패시키지 않는다.
-- lifecycle state, state-attached session ref, session report, metadata `applies_to_source`, release, clear는 모두 정확히 `source: herdr:pi`, `agent: pi`를 사용한다.
-- session ref는 `ctx.sessionManager.getSessionFile()` absolute path를 우선하고 ID를 fallback으로 사용하며 매 `agent_start`에 refresh한다.
-- metadata teardown은 true clear flags와 15개 owned metadata token의 null patch, priority release를 각각 한 번씩, close와 함께 하나의 configured deadline 안에서 시도하고 만료 시 abort한다.
-- managed `herdr-agent-state.ts`가 있으면 marker 유무와 관계없이, 또는 판정할 수 없으면 fail-closed 한다. `ENOENT`만 부재로 인정한다. exact `~`/`~/`만 확장하고 relative·non-canonical·control/bidi·공백 padded 경로는 `unknown`이다. 이 경우 client, local events, retained session을 만들지 않는다.
-- queue/retry는 bounded이며 일반 lifecycle/metadata 요청은 최대 두 번 시도한다. 두 시도의 연결/응답 timeout은 `PI_HERDR_PRESENCE_TIMEOUT_MS`를 반씩 사용하고 `notification.show`, teardown metadata clear, priority release는 각각 한 번만 시도하며 재시도하지 않는다. polling은 없다.
-- generic producer는 같은 process trust boundary 안의 협력 component이다. unknown remove는 fence slot을 할당하지 않고, source fence 수는 bounded다.
+`test/process-coordinator.test.ts` imports cache-busted copies of the coordinator, managed-hook probe, and transport. It verifies the immutable process-global installation, one unresolved probe/fingerprint lease across module instances, monotonic sequence allocation with an internally sampled clock, ordered detached old-cleanup/new-startup execution, and the generation fence that makes a stale teardown close locally rather than clear newer authority. Lifecycle callbacks never await this authority lane. The proxy-focused coordinator tests verify that hostile global or method proxies fail closed without invoking their traps or accessors.
