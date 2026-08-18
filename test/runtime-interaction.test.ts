@@ -331,7 +331,7 @@ serial(
 		}),
 );
 serial(
-	"metadata emits exactly nine interaction and attention tokens",
+	"metadata emits ten interaction and attention tokens",
 	async () =>
 		withRuntime(
 			{
@@ -387,6 +387,7 @@ serial(
 					.find((v) => v.v2_terminals);
 				expect(t).toBeDefined();
 				expect(Object.keys(t!)).toEqual([
+					"summary",
 					"v2_progress",
 					"v2_attention",
 					"v2_interaction",

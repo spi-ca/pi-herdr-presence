@@ -9,7 +9,8 @@ import { expectExactAgentAuthorityClear, expectExactLegacyMetadataClear, expectE
 type Request = { id: string; method: string; params: Record<string, unknown> };
 const session = { agent_session_id: "root-session" } as const;
 const nullTokens = Object.fromEntries(OWNED_METADATA_TOKENS.map((key) => [key, null])) as HerdrMetadataTokens;
-const metadata = (tokens: HerdrMetadataTokens = nullTokens) => tokens;
+const idleTokens = { ...nullTokens, summary: "idle" };
+const metadata = (tokens: HerdrMetadataTokens = idleTokens) => tokens;
 
 function recordingTransport() {
   const requests: Request[] = [];
@@ -28,11 +29,12 @@ function recordingTransport() {
   };
 }
 
-function client(transport: object, timeoutMs = 100) {
+function client(transport: object, timeoutMs = 100, mode: "standalone" | "companion" = "standalone") {
   return new PresenceClient(
     { paneId: "pane", socketPath: "/socket" },
     transport as never,
     { ...resolvePresenceConfig(), timeoutMs },
+    mode,
   );
 }
 
@@ -62,7 +64,7 @@ test("client allocator is process-monotonic across replacement clients and wall-
     Date.now = () => 1_600_000_000_000;
     const replacement = client(fake.transport);
     await replacement.report("idle", session);
-    await first.metadata(presentation(), nullTokens);
+    await first.metadata(presentation(), idleTokens);
     const sequences = fake.requests.map((request) => request.params.seq as number);
     expect(sequences).toHaveLength(5);
     expect(sequences.every((sequence, index) => index === 0 || sequence > sequences[index - 1]!)).toBe(true);
@@ -76,6 +78,7 @@ test("startup clears exact current and legacy chunks before fixed presentation",
   const fake = recordingTransport();
   const presence = client(fake.transport);
   const populated = {
+    summary: "input · 2/5 · running 1 · queued 2 · input 1",
     v2_progress: "2/5",
     v2_attention: "failure:new",
     v2_interaction: "ask_user:1",
@@ -121,7 +124,7 @@ test("a failed legacy migration is one bounded attempt and does not block normal
     async close() {},
   });
 
-  await presence.metadata(presentation(), nullTokens);
+  await presence.metadata(presentation(), idleTokens);
   await presence.notify("Pi needs attention", "A Pi task needs attention", true);
 
   expect(requests.map((request) => request.method)).toEqual(["pane.report_metadata", "pane.report_metadata", "pane.report_metadata", "notification.show"]);
@@ -177,6 +180,26 @@ test("metadata-disabled clients still clear stale current and legacy ownership a
   expectExactMetadataClear(fake.requests[2]!.params);
   expectExactLegacyMetadataClear(fake.requests[3]!.params);
   expectExactAgentAuthorityClear(fake.requests[4]!.params);
+});
+
+test("companion owns only its token projection and never sends authority calls", async () => {
+  const fake = recordingTransport();
+  const presence = client(fake.transport, 100, "companion");
+  await presence.prepareSessionAuthority();
+  await presence.reportSession(session);
+  await presence.report("working", session, "Pi is working");
+  await presence.metadata(presentation(), idleTokens);
+  await presence.teardown();
+
+  expect(fake.requests).toHaveLength(3);
+  for (const request of fake.requests) {
+    expect(request.method).toBe("pane.report_metadata");
+    expect(request.params).toMatchObject({ source: "herdr:pi-presence", applies_to_source: "herdr:pi" });
+    expect(request.params).not.toHaveProperty("agent");
+    expect(request.params).not.toHaveProperty("title");
+    expect(request.params).not.toHaveProperty("clear_title");
+  }
+  expect(fake.requests.some(request => request.method === "pane.clear_agent_authority")).toBe(false);
 });
 
 test("invalid output and serialization failures are contained without dispatch", async () => {

@@ -1,31 +1,24 @@
-# Nine-token metadata projection
+# Ten-token metadata projection
 
-This extension consumes the shared `@pi/presence` V2 stream and translates accepted state, terminal, and withdraw events into Herdr's fixed metadata projection. It does not define, restate, or fork the shared protocol.
+This extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared protocol and terminal encoding remain defined by the pinned [protocol API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md), [lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json).
 
-The immutable canonical references pinned by this package are:
+Every ordinary render has exactly these keys:
 
-- [protocol API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md)
-- [consumer and producer lifecycle](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md)
-- [canonical terminal encoding fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json)
+- `summary`
+- `v2_progress`, `v2_attention`, `v2_interaction`, `v2_subagents`
+- `v2_terminals`, `v2_terminal_overflow`
+- `tokens`, `cost`, `context`
 
-Herdr receives exactly these keys on every metadata render, with `null` for unavailable values:
+Unavailable values are `null` except `summary`, which is always a bounded safe-derived grammar. It retains semantic `working` or `idle` and, unless blocked/input/failure takes precedence, appends the latest accepted terminal arrival as `terminal completed`, `terminal cancelled`, or `terminal failed`. When that closed segment needs space, lower-priority progress/count segments are omitted rather than truncating the grammar. `v2_terminals` remains separately encoded by the shared canonical encoder; its canonical sort order is not used to choose the summary outcome. Terminal records, their summary segment, and both terminal tokens clear together after the configured retention period.
 
-- `v2_progress`
-- `v2_attention`
-- `v2_interaction`
-- `v2_subagents`
-- `v2_terminals`
-- `v2_terminal_overflow`
-- `tokens`
-- `cost`
-- `context`
+## Standalone envelopes and cleanup
 
-Non-null values are fixed compact projections only: canonical V2 progress (`completed/total`), attention (`reason:occurrence`), interaction (`ask_user:pending`), and seven-count subagent values; the shared canonical terminal batch plus its canonical overflow integer; and bounded canonical decimal usage values. No arbitrary text is a valid token value. `v2_terminals` and `v2_terminal_overflow` are either both `null` or both populated.
+Standalone uses `source: "herdr:pi"`. Its ordinary metadata envelope includes `pane_id`, `source`, `applies_to_source`, `agent`, `seq`, fixed `title: "Pi"`/`display_agent: "Pi"`/state labels, and the ten-token map. No context or arbitrary text is projected.
 
-Before restoring session authority or sending any ordinary envelope, startup sends two bounded, non-retried cleanup chunks: current V2 `clear_title`/`clear_display_agent`/`clear_state_labels` flags with all nine tokens set to `null`, then a token-only patch for the exact pre-V2 keys `active`, `completed`, `failed`, `queued`, `cancelled`, `total`, `progress`, `subagents`, `subagent_wait`, `subagent_error`, `subagent_terminal`, and `subagent_terminal_at`, all set to `null`. The chunks contain 9 and 12 tokens respectively (never more than 16), contain no text or paths, and the startup fence cannot follow a fixed presentation report.
+Before standalone reports ordinary metadata, it sends two separate bounded, non-retried cleanup envelopes: a current projection clear with presentation-clear flags and all ten tokens `null`, then a legacy-token-only clear with its exact twelve old keys `null`. They remain separate because each is independently owned and bounded. Teardown repeats both and, only if time remains, may send the standalone authority clear.
 
-`v2_terminals` is always formed by the shared canonical encoder. Because unmodified Herdr accepts at most 80 UTF-8 bytes for this token value, the projection omits oldest retained terminal records until the encoded canonical value fits. It retains the newest records and adds every omission to bounded `v2_terminal_overflow`.
+## Companion envelopes and cleanup
 
-An ordinary metadata envelope contains `pane_id`, `source`, `applies_to_source`, `agent`, `seq`, fixed `title`/`display_agent`/`state_labels`, and `tokens`. The presentation values are only the fixed strings `Pi`, `Pi is idle`, `Pi is working`, `Pi needs attention`, and `Pi state unknown`; no path, prompt, output, error text, producer label, or identifier is allowed. Teardown repeats both cleanup chunks within one deadline. Only when those stages leave time and the client is still open does it make at most one priority, non-retried `pane.clear_agent_authority` attempt. Its strict envelope contains only `pane_id`, `source: "herdr:pi"`, and `seq`; it has no `agent`, metadata, path, or text field. Deadline expiry can prevent this dispatch, so the remote clear is not unconditional exactly-once. Startup and teardown cleanup are independent of the ordinary metadata setting.
+Companion uses `source: "herdr:pi-presence"` and `applies_to_source: "herdr:pi"`. Its ordinary and cleanup metadata envelopes contain only `pane_id`, `source`, `applies_to_source`, `seq`, and the ten-token map. Companion clears only its own ten tokens and may emit policy-gated static notifications; it never emits session/state authority, presentation, legacy cleanup, authority clear, focus/control, or arbitrary text.
 
-Under the default `errors` policy, only live receipt-accepted V2 terminal failures and new `blocked`, `input_required`, or `failure` attention edges can send one bounded static `notification.show`; retained activation replay cannot. Opt-in `background` and `all` policies also allow the local long-running timer's static alert, which is not a V2 edge. See the pinned [protocol API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json).
+Notifications default to `errors`: only live accepted terminal failures and new `blocked`, `input_required`, or `failure` attention edges are eligible. Notifications have fixed text and are never retried.

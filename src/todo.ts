@@ -15,6 +15,8 @@ function owner(tools: unknown): string | null { if (!Array.isArray(tools)) retur
 /** Candidate local producer input. It retains counts only and never reads task text. */
 export class TodoProgressAdapter {
   private owner: string | null = null;
+  /** A root-session boundary permits the next session's distinct Todo implementation. */
+  reset(): void { this.owner = null; }
   accept(event: unknown, tools: unknown, generation: number, sequence: number): PresenceStateInputV2 | null {
     try {
       if (!isPlainObject(event) || event.toolName !== "todo" || event.isError !== false) return null;

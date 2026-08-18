@@ -1,12 +1,15 @@
-import type { PresenceStateV2, Subagents, TerminalBatch } from "@pi/presence";
+import type { PresenceStateV2, PresenceTerminalV2, Subagents, TerminalBatch } from "@pi/presence";
 import { HERDR_FIXED_PRESENTATION, type HerdrMetadataTokens, type HerdrPresentation } from "./protocol.js";
 import { boundedPresenceText } from "./text.js";
 
 export type HerdrState = "idle" | "working" | "blocked" | "unknown";
 export type BlockedCategory = "ask-user" | "blocked";
 type Usage = { tokens?: number; cost?: number; contextPercent?: number } | undefined;
+type LatestTerminalOutcome = PresenceTerminalV2["outcome"] | undefined;
 
 const LIMIT = 1_000_000;
+const SUMMARY_MAX_BYTES = 80;
+const SUMMARY_MAX_CODE_POINTS = 80;
 const count = (value: unknown): number | undefined => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= LIMIT ? value : undefined;
 /** Decimal only, no exponent/sign/trailing zero ambiguity, and capped to the shared numeric budget. */
 function decimal(value: unknown): string | null {
@@ -42,13 +45,11 @@ export function blockedPresentationCategory(events: readonly PresenceStateV2[]):
   return events.some(isInteractionWaiting) ? "ask-user" : "blocked";
 }
 export function compositeState(events: readonly PresenceStateV2[], active: boolean): HerdrState {
-  // Canonical blocked attention remains blocked even when its producer state is
-  // waiting; otherwise a waiting producer could overwrite the fixed pane state.
   if (events.some(hasFailure) || events.some(hasBlockedAttention) || events.some(isInteractionWaiting)) return "blocked";
   if (active || events.some(event => event.state === "running" || event.state === "waiting")) return "working";
   return "idle";
 }
-/** Only fixed, privacy-safe strings reach the primary pane report. */
+/** Only fixed, privacy-safe strings reach pane state messages and labels. */
 export function safeMessage(state: HerdrState, max: number, events: readonly PresenceStateV2[] = [], parentActive = false): string {
   const aggregate = subagents(events);
   const category = blockedPresentationCategory(events);
@@ -63,11 +64,39 @@ export function safeMessage(state: HerdrState, max: number, events: readonly Pre
   return boundedPresenceText(text, { maxBytes: 128, maxCodePoints: max });
 }
 
-/** Herdr v8 presentation is deliberately constant: no producer or user text can become pane chrome. */
+/** Presentation is fixed; all varying status is represented by safe metadata tokens. */
 export function presentation(): HerdrPresentation { return HERDR_FIXED_PRESENTATION; }
 
-/** Nine fixed V2 keys: every absent datum is explicitly withdrawn with null. */
-export function metadata(events: readonly PresenceStateV2[], terminals?: TerminalBatch, usage?: Usage): HerdrMetadataTokens {
+function addSummarySegment(parts: string[], value: string, reserve = 0) {
+  const candidate = [...parts, value].join(" · ");
+  if (Buffer.byteLength(candidate, "utf8") + reserve <= SUMMARY_MAX_BYTES && [...candidate].length + reserve <= SUMMARY_MAX_CODE_POINTS) parts.push(value);
+}
+function terminalSegment(outcome: LatestTerminalOutcome): string | undefined {
+  return outcome === "completed" || outcome === "cancelled" || outcome === "failed" ? `terminal ${outcome}` : undefined;
+}
+/** A bounded fixed-order grammar; terminal outcome is arrival-derived, never canonical-sort-derived. */
+function summary(events: readonly PresenceStateV2[], state: HerdrState, progressToken: string | null, interactionToken: string | null, latestTerminal?: LatestTerminalOutcome): string {
+  const aggregate = subagents(events);
+  const stateSegment = state === "blocked" && interactionToken ? "input" : state;
+  // Blocking, input, and failure all resolve to blocked and intentionally hide
+  // the transient terminal. Otherwise retain semantic working/idle plus the
+  // newest accepted terminal arrival as a closed trailing segment.
+  const terminal = state === "blocked" || stateSegment === "input" ? undefined : terminalSegment(latestTerminal);
+  const parts = [stateSegment];
+  const reserve = terminal ? Buffer.byteLength(` · ${terminal}`, "utf8") : 0;
+  if (progressToken) addSummarySegment(parts, progressToken, reserve);
+  const running = aggregate && count(aggregate.running);
+  const queued = aggregate && count(aggregate.queued);
+  const pending = interactionToken?.slice("ask_user:".length);
+  if (running !== undefined) addSummarySegment(parts, `running ${running}`, reserve);
+  if (queued !== undefined) addSummarySegment(parts, `queued ${queued}`, reserve);
+  if (pending !== undefined) addSummarySegment(parts, `input ${pending}`, reserve);
+  if (terminal) addSummarySegment(parts, terminal);
+  return parts.join(" · ");
+}
+
+/** Ten local Herdr keys: every unavailable datum except derived summary is null. */
+export function metadata(events: readonly PresenceStateV2[], terminals?: TerminalBatch, usage?: Usage, parentActive = false, state = compositeState(events, parentActive), latestTerminal?: LatestTerminalOutcome): HerdrMetadataTokens {
   const progress = [...events].filter(event => event.progress).sort(compareProgress)[0]?.progress;
   const attention = [...events].filter(event => event.attention).sort(compareAttention)[0]?.attention;
   const interaction = events.find(isInteractionWaiting)?.interaction;
@@ -78,6 +107,7 @@ export function metadata(events: readonly PresenceStateV2[], terminals?: Termina
   const subagentValues = aggregate && [aggregate.running, aggregate.cancelling, aggregate.queued, aggregate.completed, aggregate.failed, aggregate.cancelled, aggregate.omitted];
   const subagentToken = subagentValues?.every(value => count(value) !== undefined) ? subagentValues.join(",") : null;
   return {
+    summary: summary(events, state, progressToken, interactionToken, latestTerminal),
     v2_progress: progressToken,
     v2_attention: attentionToken,
     v2_interaction: interactionToken,

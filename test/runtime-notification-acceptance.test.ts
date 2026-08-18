@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { join } from "node:path";
 import { EVENT_NAMES, createPresenceProducer } from "@pi/presence";
 import { resolvePresenceConfig } from "../src/config.js";
+import { isExactCompanionMetadataClearParams, isExactCompanionMetadataParams } from "../src/protocol.js";
 import { PresenceRuntime } from "../src/runtime.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
@@ -62,6 +63,60 @@ test("live metadata is queued before a best-effort toast behind an active agent 
     expect(requests.some(request => request.method === "notification.show")).toBe(false);
   } finally {
     releaseReport?.();
+    producer?.deactivate();
+    await runtime.shutdownSession((runtime as unknown as { context: object }).context);
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("companion emits a policy-eligible static notification while retaining exact token-only metadata", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-v2-companion-notice-"));
+  const agentDirectory = join(directory, "agent");
+  const socketPath = join(directory, "socket");
+  const requests: Request[] = [];
+  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
+  const listeners = new Map<string, Array<(payload: unknown) => void>>();
+  const events = {
+    on(name: string, listener: (payload: unknown) => void) { listeners.set(name, [...(listeners.get(name) ?? []), listener]); },
+    emit(name: string, payload: unknown) { for (const listener of listeners.get(name) ?? []) listener(payload); },
+  };
+  const server = await fakeSocket(socketPath, line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const runtime = new PresenceRuntime({ getAllTools: () => [], events } as never, {
+    ...resolvePresenceConfig(), enabled: true, mode: "auto", metadata: true, notifications: true, notificationPolicy: "errors", maxQueue: 128,
+  });
+  let producer: ReturnType<typeof createPresenceProducer> | undefined;
+  try {
+    await fs.mkdir(join(agentDirectory, "extensions"), { recursive: true });
+    await fs.writeFile(join(agentDirectory, "extensions", "herdr-agent-state.ts"), "HERDR_INTEGRATION_ID=pi");
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: agentDirectory });
+    for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) events.on(name, payload => runtime.handlePresenceEvent(name, payload));
+    await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
+
+    producer = createPresenceProducer({ source: "subagent", emit: events.emit });
+    expect(producer?.activate()).toBe(true);
+    producer!.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" });
+    await eventually(() => expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1));
+
+    const notices = requests.filter(request => request.method === "notification.show");
+    expect(notices.map(request => request.params)).toEqual([{ title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" }]);
+    const metadata = requests.filter(request => request.method !== "notification.show");
+    expect(metadata).not.toHaveLength(0);
+    for (const request of metadata) {
+      expect(request.method).toBe("pane.report_metadata");
+      expect(isExactCompanionMetadataParams(request.params) || isExactCompanionMetadataClearParams(request.params)).toBe(true);
+      expect(request.params).toMatchObject({ source: "herdr:pi-presence", applies_to_source: "herdr:pi" });
+      for (const field of ["agent", "agent_session_id", "session_start_source", "state", "message", "title", "display_agent", "state_labels", "clear_title", "clear_display_agent", "clear_state_labels", "focus", "control"]) {
+        expect(request.params).not.toHaveProperty(field);
+      }
+      expect(Object.keys(request.params.tokens as object)).not.toContain("active");
+    }
+  } finally {
     producer?.deactivate();
     await runtime.shutdownSession((runtime as unknown as { context: object }).context);
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }

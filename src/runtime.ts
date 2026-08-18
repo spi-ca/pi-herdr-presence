@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPresenceConsumer, createPresenceProducer, encodeTerminalBatch, MAX_INTEGER, type PresenceConsumerHandle, type PresenceEventV2, type PresenceProducerHandle, type PresenceStateInputV2, type PresenceStateV2, type PresenceTerminalV2, type TerminalBatch } from "@pi/presence";
 import { PresenceClient, type SessionRef } from "./client.js";
-import type { PresenceConfig } from "./config.js";
+import { resolvePresenceMode, type PresenceConfig, type PresenceMode } from "./config.js";
 import { readHerdrIdentity } from "./identity.js";
 import { ExternalAttentionTransitions, NotificationDeduper, NotificationRateLimiter, shouldNotify, type NotificationCooldownKind, type NotificationSeverity } from "./notification-policy.js";
 import { officialHookStatus } from "./official-hook.js";
@@ -21,10 +21,14 @@ const MAX_TERMINAL_TOMBSTONES = 64;
 const MAX_FAILURE_PAIRS = 64;
 /** Detached startup retains only these derived lifecycle edges, never source payloads. */
 const MAX_PENDING_LIFECYCLE_EDGES = 64;
+/** Live notification edges received after activation cannot grow an unbounded startup backlog. */
+const MAX_PENDING_NOTIFICATION_CANDIDATES = 64;
 const MAX_DERIVED_USAGE = 1_000_000;
 /** A bounded synchronous producer terminal/state pair has no reason to outlive one tick. */
 const FAILURE_PAIR_WINDOW_MS = 10;
 const EXTERNAL_NOTIFICATION_COALESCE_MS = 50;
+/** Startup must reach a stable aggregate snapshot before any observer-visible output opens. */
+const MAX_STARTUP_PROJECTION_PASSES = 16;
 type SessionManagerProvider = { getSessionId?: () => unknown };
 type ContextUsageProvider = { getContextUsage?: () => unknown; isIdle?: () => boolean; sessionManager?: SessionManagerProvider };
 type Terminal = "success" | "error" | "cancelled";
@@ -41,6 +45,10 @@ type PendingLifecycleEdge =
   | { kind: "message_end"; usage: DerivedUsage }
   | { kind: "tool_result"; failed: boolean; todo?: DerivedTodo };
 type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean };
+type PendingNotificationCandidate =
+  | { kind: "state"; event: PresenceStateV2; inputPresent: boolean; suppressed: boolean; acceptedAt: number }
+  | { kind: "terminal"; event: PresenceTerminalV2; acceptedAt: number }
+  | { kind: "withdraw"; inputPresent: boolean; suppressed: boolean; acceptedAt: number };
 
 function sessionManager(context: unknown): SessionManagerProvider | null {
   try {
@@ -106,12 +114,23 @@ export class PresenceRuntime {
   private client: PresenceClient | null = null;
   /** Process-global ownership fences a stale cache-busted runtime's teardown. */
   private authorityGeneration: number | null = null;
+  /** Selected only after the managed-hook probe; disabled never acquires local resources. */
+  private mode: PresenceMode = "disabled";
   private consumer: PresenceConsumerHandle | null = null;
   /** The exact opaque ready capability emitted by the active consumer. */
   private consumerReady: PresenceConsumerHandle["ready"] | null = null;
   private consumerActive = false;
   /** Replay is retained state, not a live output edge, until session ownership settles. */
   private outputReady = false;
+  /** True only while consumer.activate() synchronously replays retained state/ready. */
+  private activationReplay = false;
+  /** Post-activation live edges await the initial projection without duplicating it. */
+  private pendingNotifications: PendingNotificationCandidate[] = [];
+  private pendingNotificationsOverflow = false;
+  /** An internal-only output path keeps startup projection atomic to observers. */
+  private initialProjectionInFlight = false;
+  private initialProjectionDirty = false;
+  private notificationAcceptanceTime = 0;
   private localPi: PresenceProducerHandle | null = null;
   private localTodo: PresenceProducerHandle | null = null;
   private localPiActive = false;
@@ -169,6 +188,10 @@ export class PresenceRuntime {
 
   async startSession(context: unknown, event?: unknown) {
     const epoch = ++this.epoch;
+    // A session boundary permits a distinct Todo implementation in the new root.
+    this.todo.reset();
+    this.clearPendingNotifications();
+    this.notificationAcceptanceTime = 0;
     // A replacement must not leave the previous consumer able to accept same-tick ingress.
     this.ingressEpoch = null;
     const current = session(context);
@@ -209,28 +232,27 @@ export class PresenceRuntime {
   private async beginSession(context: unknown, event: unknown, epoch: number, current: RuntimeSession | null) {
     await this.teardown();
     if (epoch !== this.epoch) return;
-    if ((context as { mode?: unknown })?.mode !== "tui") { this.discardPendingLifecycle(epoch); return; }
+    if ((context as { mode?: unknown })?.mode !== "tui") { this.abandonStartup(epoch); return; }
     const identity = readHerdrIdentity();
     // Use the session_start snapshot, not a potentially mutated manager read
     // after asynchronous authority probing.
-    if (!identity || !current) { this.discardPendingLifecycle(epoch); return; }
-    let managed = true;
-    try {
-      const official = await officialHookStatus();
-      // File absence cannot prove no already-loaded integration exists. Local
-      // authority therefore needs both the exact absence proof and operator opt-in.
-      managed = !this.config.soleReporter || official !== "absent";
-    } catch { managed = true; }
+    if (!identity || !current) { this.abandonStartup(epoch); return; }
+    let mode: PresenceMode = "disabled";
+    try { mode = resolvePresenceMode(this.config, await officialHookStatus()); } catch {}
     if (epoch !== this.epoch) return;
-    if (managed) { this.discardPendingLifecycle(epoch); return; }
-
-    const client = new PresenceClient(identity, new HerdrSocketTransport(identity.socketPath, this.config.timeoutMs, this.config.maxQueue), this.config);
-    const consumer = createPresenceConsumer({ id: "pi-herdr-presence" });
-    if (!consumer) { this.discardPendingLifecycle(epoch); return; }
+    if (mode === "disabled") { this.abandonStartup(epoch); return; }
+    let client: PresenceClient;
+    let consumer: ReturnType<typeof createPresenceConsumer>;
+    try {
+      client = new PresenceClient(identity, new HerdrSocketTransport(identity.socketPath, this.config.timeoutMs, this.config.maxQueue), this.config, mode);
+      consumer = createPresenceConsumer({ id: "pi-herdr-presence" });
+    } catch { this.abandonStartup(epoch); return; }
+    if (!consumer) { this.abandonStartup(epoch); return; }
     // A consumer activation is the ownership acquisition point. Keep this
     // unowned client local until activation succeeds so a failed contender
     // cannot emit startup or teardown traffic for the pane.
     this.consumer = consumer;
+    this.mode = mode;
     this.consumerReady = consumer.ready;
     this.sessionId = current.id;
     this.sessionRef = current.ref;
@@ -259,6 +281,9 @@ export class PresenceRuntime {
     this.lastPiState = null;
     this.lastTodoState = null;
     this.clearFailureArrivals();
+    this.clearPendingNotifications();
+    this.initialProjectionInFlight = false;
+    this.initialProjectionDirty = false;
 
     // Activation synchronously replays retained producer state. Open ingress only
     // for this epoch before activation so replay reaches the reducer; a failed
@@ -266,9 +291,10 @@ export class PresenceRuntime {
     this.ingressEpoch = epoch;
     this.consumerActive = true;
     let activated = false;
+    this.activationReplay = true;
     try {
       activated = consumer.activate((name, ready) => { try { this.pi.events.emit(name, ready); } catch {} }) === true;
-    } catch { activated = false; }
+    } catch { activated = false; } finally { this.activationReplay = false; }
     if (!activated || epoch !== this.epoch || this.consumer !== consumer || this.consumerReady !== consumer.ready) {
       this.teardownLocal();
       this.discardPendingLifecycle(epoch);
@@ -277,29 +303,51 @@ export class PresenceRuntime {
     // Claim only after this lane has retired this runtime's prior authority and
     // activation succeeded. A later stale teardown sees a different generation
     // and closes locally without sending pane cleanup for this new owner.
-    this.authorityGeneration = processCoordinator.claimAuthority();
+    if (mode === "standalone") this.authorityGeneration = processCoordinator.claimAuthority();
     this.client = client;
     try {
-      // Remove stale current and legacy ownership before restoring this
-      // session's authority. Cleanup is bounded, non-retried, and observer-only.
+      // Standalone clears current/legacy ownership before restoring authority;
+      // companion clears only its separately-owned token projection.
       await client.prepareSessionAuthority();
       if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
-      await client.reportSession(current.ref, typeof (event as { reason?: unknown })?.reason === "string" ? (event as { reason: string }).reason : undefined);
+      if (mode === "standalone") await client.reportSession(current.ref, typeof (event as { reason?: unknown })?.reason === "string" ? (event as { reason: string }).reason : undefined);
     } catch {
       // Lifecycle output is observer-only; buffered retained state still gets
       // one quiet render after bounded cleanup and session attempts settle.
     }
     if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
 
+    // Retained replay only reconstructs state. Keep public output closed while
+    // the internal startup path awaits report + metadata, so live ingress cannot
+    // race a stale initial projection into the socket queue.
+    this.initialProjectionInFlight = true;
+    let stabilized = false;
+    for (let pass = 0; pass < MAX_STARTUP_PROJECTION_PASSES; pass += 1) {
+      // Clear immediately before every await: ingress during that pass requires
+      // another complete snapshot, while the public output gate remains closed.
+      this.initialProjectionDirty = false;
+      await this.renderCurrent(true);
+      if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+      if (!this.initialProjectionDirty) { stabilized = true; break; }
+    }
+    if (!stabilized) {
+      // Do not publish a projection known to have been superseded. Fence ingress
+      // synchronously, then retire this runtime's client and consumer ownership.
+      this.ingressEpoch = null;
+      this.outputReady = false;
+      this.discardPendingLifecycle(epoch);
+      await this.teardown();
+      return;
+    }
+    // No await may separate the clean-pass check from this release.
     this.outputReady = true;
-    // Retained replay only reconstructs state. Complete the initial pane
-    // projection before any live notification can enter the socket queue.
-    await this.renderCurrent();
-    if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+    this.initialProjectionInFlight = false;
     // Retained terminals get their normal bounded metadata lifetime, but never a toast.
     this.scheduleTerminalClear();
     // Consumer activation may synchronously replay retained V2 state. It is
-    // projected above, but never promoted into a visible notification.
+    // projected above, but never promoted into a visible notification. Live
+    // edges accepted only after activate() returned drain once, in arrival order.
+    this.drainPendingNotifications();
     this.activateLocalCandidates();
     this.updateContextUsage();
     const pending = this.pendingLifecycle?.epoch === epoch && this.pendingLifecycle.id === current.id && this.pendingLifecycle.manager === current.manager ? this.pendingLifecycle : null;
@@ -333,13 +381,23 @@ export class PresenceRuntime {
   }
 
   private accept(event: PresenceEventV2) {
+    // activate() synchronously replays retained producer state and ready. Once
+    // it returns, accepted events are live even though authority output may
+    // still be awaiting socket work.
+    const deferLiveNotification = !this.activationReplay && this.consumerActive && (!this.outputReady || this.initialProjectionInFlight);
+    if (deferLiveNotification && this.initialProjectionInFlight) this.initialProjectionDirty = true;
     if ("state" in event) {
       // A neutral state is a same-source semantic exit: a later external
       // failure or block must be allowed to create a fresh attention edge.
       if (!event.attention) this.externalAttention.remove(event.source);
       this.states.set(event.source, event);
+      const inputPresent = [...this.states.values()].some(isInteractionWaiting);
+      const suppressed = [...this.states.values()].some(candidate => candidate.state === "error" || candidate.attention?.reason === "failure");
       // Retained activation replay is state reconstruction, never an alert.
-      if (!this.outputReady) return;
+      if (!this.outputReady || deferLiveNotification) {
+        if (deferLiveNotification) this.appendPendingNotification({ kind: "state", event, inputPresent, suppressed, acceptedAt: this.nextNotificationAcceptanceTime() });
+        return;
+      }
       this.render(event);
       this.syncInputNotification(isLiveInputRequest(event));
       return;
@@ -347,13 +405,21 @@ export class PresenceRuntime {
     if ("eventId" in event) {
       if (!this.recordTerminal(event, this.outputReady)) return;
       // A terminal replay can populate the fixed token batch but never toast.
-      if (!this.outputReady) return;
+      if (!this.outputReady || deferLiveNotification) {
+        if (deferLiveNotification) this.appendPendingNotification({ kind: "terminal", event, acceptedAt: this.nextNotificationAcceptanceTime() });
+        return;
+      }
       this.dispatchTerminal(event);
       return;
     }
     this.states.delete(event.source);
     this.externalAttention.remove(event.source);
-    if (!this.outputReady) return;
+    const inputPresent = [...this.states.values()].some(isInteractionWaiting);
+    const suppressed = [...this.states.values()].some(candidate => candidate.state === "error" || candidate.attention?.reason === "failure");
+    if (!this.outputReady || deferLiveNotification) {
+      if (deferLiveNotification) this.appendPendingNotification({ kind: "withdraw", inputPresent, suppressed, acceptedAt: this.nextNotificationAcceptanceTime() });
+      return;
+    }
     this.render();
     this.syncInputNotification();
   }
@@ -399,6 +465,7 @@ export class PresenceRuntime {
   private isIngressOpen(): boolean { return this.ingressEpoch === this.epoch; }
   private canOutput(): boolean { return this.isIngressOpen() && this.rootSession && this.consumerActive && this.outputReady; }
   private discardPendingLifecycle(epoch: number) { if (this.pendingLifecycle?.epoch === epoch) this.pendingLifecycle = null; }
+  private abandonStartup(epoch: number) { this.discardPendingLifecycle(epoch); }
   private hasActiveSessionContext(context: unknown): context is ContextUsageProvider { return this.activeSessionFence(context) !== undefined; }
   private isActiveSessionFence(fence: { epoch: number; context: ContextUsageProvider }): boolean {
     return this.epoch === fence.epoch && this.hasActiveSessionContext(fence.context);
@@ -408,6 +475,60 @@ export class PresenceRuntime {
     if (pending.overflow) return;
     if (pending.edges.length >= MAX_PENDING_LIFECYCLE_EDGES) { pending.edges = []; pending.overflow = true; return; }
     pending.edges.push(edge);
+  }
+
+  /** Preserve only a bounded exact-order live notification sequence during startup. */
+  private appendPendingNotification(candidate: PendingNotificationCandidate) {
+    if (this.pendingNotificationsOverflow) return;
+    if (this.pendingNotifications.length >= MAX_PENDING_NOTIFICATION_CANDIDATES) {
+      this.pendingNotifications = [];
+      this.pendingNotificationsOverflow = true;
+      return;
+    }
+    this.pendingNotifications.push(candidate);
+  }
+
+  /** Startup state/metadata has already rendered; drain policy-only edges without rendering again. */
+  private drainPendingNotifications() {
+    const pending = this.pendingNotifications;
+    const overflow = this.pendingNotificationsOverflow;
+    this.clearPendingNotifications();
+    if (overflow || !this.canOutput()) return;
+    // Startup edges can wait on socket work longer than the pairing window. Pair
+    // only the original acceptance times, then dispatch every unpaired failure
+    // directly in accepted order instead of starting fresh drain-time timers.
+    const paired = new Set<PendingNotificationCandidate>();
+    for (const state of pending) {
+      if (state.kind !== "state" || state.event.attention?.reason !== "failure" || paired.has(state)) continue;
+      const terminal = pending.find(candidate => candidate.kind === "terminal"
+        && !paired.has(candidate)
+        && candidate.event.outcome === "failed"
+        && candidate.event.source === state.event.source
+        && candidate.event.generation === state.event.generation
+        && Math.abs(candidate.acceptedAt - state.acceptedAt) <= FAILURE_PAIR_WINDOW_MS);
+      if (terminal) { paired.add(state); paired.add(terminal); }
+    }
+    for (const candidate of pending) {
+      if (!this.canOutput()) return;
+      if (candidate.kind === "terminal") this.dispatchTerminal(candidate.event, false);
+      else if (candidate.kind === "state") {
+        if (!paired.has(candidate)) this.dispatchStateAttention(candidate.event, false, true);
+        this.syncInputNotification(isLiveInputRequest(candidate.event), candidate.inputPresent, candidate.suppressed);
+      } else this.syncInputNotification(false, candidate.inputPresent, candidate.suppressed);
+    }
+  }
+
+  private nextNotificationAcceptanceTime(): number {
+    // Wall-clock time can be frozen or adjusted while startup is blocked. The
+    // process monotonic clock preserves the actual producer acceptance window.
+    const now = Number(process.hrtime.bigint() / 1_000_000n);
+    this.notificationAcceptanceTime = Math.min(MAX_INTEGER, Math.max(this.notificationAcceptanceTime, now));
+    return this.notificationAcceptanceTime;
+  }
+
+  private clearPendingNotifications() {
+    this.pendingNotifications = [];
+    this.pendingNotificationsOverflow = false;
   }
 
   handleAgentStart(context: unknown) {
@@ -425,7 +546,7 @@ export class PresenceRuntime {
     const client = this.client;
     const ref = this.sessionRef;
     const epoch = this.epoch;
-    if (client && ref) void client.reportSession(ref).then(() => { if (epoch !== this.epoch || this.client !== client) return; }).catch(() => {});
+    if (this.mode === "standalone" && client && ref) void client.reportSession(ref).then(() => { if (epoch !== this.epoch || this.client !== client) return; }).catch(() => {});
     // Each agent_start starts a fresh reducer turn even when detached edges
     // are replayed after a previous turn already settled.
     this.terminal = "success";
@@ -570,6 +691,7 @@ export class PresenceRuntime {
     this.ingressEpoch = null;
     this.outputReady = false;
     this.pendingLifecycle = null;
+    this.clearPendingNotifications();
     this.clearExternalAttention();
     this.clearFailureArrivals();
     // Reserve this teardown synchronously. A cache-busted replacement can queue
@@ -665,14 +787,11 @@ export class PresenceRuntime {
   }
 
   /** One live input lifecycle yields at most one alert; retained replay only restores pane state. */
-  private syncInputNotification(liveInput = false) {
-    const events = [...this.states.values()];
-    const inputPresent = events.some(isInteractionWaiting);
+  private syncInputNotification(liveInput = false, inputPresent = [...this.states.values()].some(isInteractionWaiting), suppressed = [...this.states.values()].some(event => event.state === "error" || event.attention?.reason === "failure")) {
     if (!inputPresent) { this.inputLifecycleActive = false; this.inputNotificationPending = false; this.inputNotificationAttempted = false; return; }
     if (!this.inputLifecycleActive) this.inputLifecycleActive = true;
     if (this.inputNotificationAttempted) return;
     if (liveInput) this.inputNotificationPending = true;
-    const suppressed = events.some(event => event.state === "error" || event.attention?.reason === "failure");
     if (!this.inputNotificationPending || !this.outputReady || suppressed) return;
     this.inputNotificationTransitions = Math.min(MAX_NOTIFICATION_TRANSITIONS, this.inputNotificationTransitions + 1);
     this.discardExternalProgress();
@@ -681,15 +800,16 @@ export class PresenceRuntime {
   }
 
   /** The startup projection is awaited so agent, metadata, then notifications stay ordered. */
-  private async renderCurrent() {
+  private async renderCurrent(startup = false) {
     const ref = this.sessionRef;
     const client = this.client;
-    if (!this.canOutput() || !ref || !client) return;
+    const internalStartupOutput = startup && this.initialProjectionInFlight && this.isIngressOpen() && this.rootSession && this.consumerActive;
+    if ((!this.canOutput() && !internalStartupOutput) || !ref || !client) return;
     const events = [...this.states.values()];
     const state = compositeState(events, this.active);
     const terminals = this.currentTerminalBatch();
-    await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
-    await client.metadata(presentation(), metadata(events, terminals, this.usage.snapshot()));
+    if (this.mode === "standalone") await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
+    await client.metadata(presentation(), metadata(events, terminals, this.usage.snapshot(), this.active, state, this.latestTerminalOutcome()));
   }
 
   private render(attention?: PresenceStateV2) {
@@ -698,20 +818,20 @@ export class PresenceRuntime {
     if (!this.canOutput() || !ref || !client) return;
     const events = [...this.states.values()];
     const state = compositeState(events, this.active);
-    void client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
-    this.renderMetadata(events, client);
+    if (this.mode === "standalone") void client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
+    this.renderMetadata(events, client, state);
 
     this.dispatchStateAttention(attention);
   }
 
   /** Metadata-only refreshes must not repeat an unchanged pane agent report. */
-  private renderMetadata(events = [...this.states.values()], client = this.client) {
+  private renderMetadata(events = [...this.states.values()], client = this.client, state = compositeState(events, this.active)) {
     if (!this.canOutput() || !client) return;
-    void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot()));
+    void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot(), this.active, state, this.latestTerminalOutcome()));
   }
 
   /** Applies one already-accepted live state edge without re-rendering startup state. */
-  private dispatchStateAttention(attention?: PresenceStateV2) {
+  private dispatchStateAttention(attention?: PresenceStateV2, deferFailure = true, immediateExternal = false) {
     const text = attention && attentionText(attention, this.config.maxLabelChars);
     const reason = attention?.attention?.reason;
     if (!attention || !text || text.inputNeeded || !reason) return;
@@ -719,14 +839,24 @@ export class PresenceRuntime {
     const attentionKind = reason === "failure" || reason === "blocked" ? "error" : "success";
     const severity = text.error ? "error" : "success";
     if (reason === "failure") {
-      // Let a same-turn terminal claim the alert, while state-only failures retain
-      // their normal policy, coalescing, and rate-limit behavior.
-      this.queueStateFailure(attention.source, attention.generation, () =>
-        this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin),
-      );
-      return;
+      if (deferFailure) {
+        // Let a same-turn terminal claim the alert, while state-only failures retain
+        // their normal policy, coalescing, and rate-limit behavior.
+        this.queueStateFailure(attention.source, attention.generation, () =>
+          this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin),
+        );
+        return;
+      }
+      // A startup edge already waited for its pairing decision. Do not give an
+      // unpaired external failure a second coalescing timer that can reorder it.
+      if (origin === "external") {
+        if (this.externalAttention.accept(attention.source, attention.generation, attentionKind)) {
+          this.notify(severity, `${attention.source}:${attention.generation}:${attention.sequence}:${this.turn}:${reason}`, text.title, text.body, origin);
+        }
+        return;
+      }
     }
-    this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin);
+    this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin, immediateExternal);
   }
 
   /** Records each exact terminal identity once, including across reset producer fences. */
@@ -774,9 +904,11 @@ export class PresenceRuntime {
     const events = [...this.states.values()];
     const client = this.client;
     if (emitMetadata && this.rootSession && this.consumerActive && this.outputReady && client) {
-      void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot()));
+      void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot(), this.active, compositeState(events, this.active), this.latestTerminalOutcome()));
     }
     if (!this.outputReady) return;
+    // Cancellation remains a quiet display-only terminal summary.
+    if (event.outcome === "cancelled") return;
     const severity = event.outcome === "failed" ? "error" : "success";
     const origin = event.source === "pi" ? "local" : "external";
     const key = `terminal:${event.source}:${event.generation}:${event.eventId}`;
@@ -788,6 +920,9 @@ export class PresenceRuntime {
     }
     this.notify(severity, key, "Pi activity completed", "Pi activity completed", origin);
   }
+
+  /** The terminal encoder sorts canonically; summary instead follows accepted arrival order. */
+  private latestTerminalOutcome(): PresenceTerminalV2["outcome"] | undefined { return this.terminalRecords.at(-1)?.outcome; }
 
   /** An absent batch withdraws both terminal metadata tokens with null. */
   private currentTerminalBatch(): TerminalBatch | undefined {
@@ -841,10 +976,15 @@ export class PresenceRuntime {
     }
   }
 
-  private dispatchAttention(attention: PresenceStateV2, attentionKind: "error" | "success", severity: "error" | "success", title: string, body: string, origin: "local" | "external") {
+  private dispatchAttention(attention: PresenceStateV2, attentionKind: "error" | "success", severity: "error" | "success", title: string, body: string, origin: "local" | "external", immediateExternal = false) {
     const externalTransition = origin === "external" && this.externalAttention.accept(attention.source, attention.generation, attentionKind);
     if (origin === "external") {
-      if (externalTransition) this.queueExternalAttention(severity, title, body);
+      if (externalTransition) {
+        // Deferred startup candidates are already bounded and ordered. Preserve
+        // that order while retaining normal semantic dedupe, policy, and rate fences.
+        if (immediateExternal) this.notify(severity, `external:${++this.externalNotificationSequence}:${severity}`, title, body, "external");
+        else this.queueExternalAttention(severity, title, body);
+      }
       return;
     }
     if (severity === "error") this.discardExternalProgress();
@@ -955,6 +1095,10 @@ export class PresenceRuntime {
 
   private teardownLocal() {
     this.clearTerminalClearTimer();
+    this.clearPendingNotifications();
+    this.initialProjectionInFlight = false;
+    this.initialProjectionDirty = false;
+    this.activationReplay = false;
     this.clearLongRunningTimer();
     this.clearExternalAttention();
     // The ordinary ordinal reservation leaves withdrawal room at the maximum generation.
@@ -997,8 +1141,11 @@ export class PresenceRuntime {
     const authorityGeneration = this.authorityGeneration;
     this.client = null;
     this.authorityGeneration = null;
+    const mode = this.mode;
+    this.mode = "disabled";
     this.teardownLocal();
     if (!client) return;
+    if (mode === "companion") { await client.teardown(this.config.timeoutMs).catch(() => {}); return; }
     if (authorityGeneration !== null && processCoordinator.isAuthority(authorityGeneration)) {
       await client.teardown(this.config.timeoutMs).catch(() => {});
       processCoordinator.releaseAuthority(authorityGeneration);

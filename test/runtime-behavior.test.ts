@@ -148,7 +148,9 @@ test("subagent terminal success, failure, and cancellation project canonical typ
       expect((runtime as unknown as { consumerActive: boolean; terminalRecords: unknown[] }).consumerActive).toBe(true);
       expect((runtime as unknown as { terminalRecords: unknown[] }).terminalRecords).toHaveLength(3);
       expect(metadata(requests).some((tokens) => tokens.v2_terminals === "subagent:1:1:completed,subagent:1:2:failed,subagent:1:3:cancelled")).toBe(true);
-      expect(notices(requests)).toHaveLength(3);
+      expect(metadata(requests).at(-1)?.summary).toBe("idle · terminal cancelled");
+      // Cancellation stays display-only; completed and failed terminals retain their policy-gated alerts.
+      expect(notices(requests)).toHaveLength(2);
       expect(JSON.stringify(requests)).not.toContain("private agent task");
     } finally {
       producer.deactivate();
@@ -161,12 +163,13 @@ test("an active parent preserves configured background terminal projection", asy
     const producer = createPresenceProducer({ source: "subagent", emit: (name: string, payload: unknown) => events.events.emit(name, payload) })!;
     expect(producer.activate()).toBe(true);
     try {
-      runtime.handleAgentStart({ sessionManager: { getSessionId: () => "root" } });
+      (runtime as unknown as { active: boolean }).active = true;
       expect(producer.publishTerminal({ version: 2, generation: 2, sequence: 1, source: "subagent", eventId: 1, outcome: "completed" })).toBe(true);
       expect(producer.publishTerminal({ version: 2, generation: 2, sequence: 2, source: "subagent", eventId: 2, outcome: "failed" })).toBe(true);
       await pause(500);
 
       expect(metadata(requests).some((tokens) => tokens.v2_terminals === "subagent:2:1:completed,subagent:2:2:failed")).toBe(true);
+      expect(metadata(requests).at(-1)?.summary).toBe("working · terminal failed");
       expect(notices(requests)).toHaveLength(2);
     } finally {
       producer.deactivate();

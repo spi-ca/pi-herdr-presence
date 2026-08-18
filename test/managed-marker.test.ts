@@ -24,7 +24,7 @@ function eventually(assertion: () => void, timeoutMs = 1_000): Promise<void> {
   });
 }
 
-test("the reviewed managed Herdr marker blocks the V2 reporter", async () => {
+test("the reviewed managed Herdr marker enables bounded companion token reporting", async () => {
   const root = await fs.mkdtemp(join(os.tmpdir(), "herdr-managed-marker-"));
   const agentDirectory = join(root, "agent");
   const socketPath = join(root, "socket");
@@ -33,6 +33,7 @@ test("the reviewed managed Herdr marker blocks the V2 reporter", async () => {
     ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"].map((key) => [key, process.env[key]]),
   );
   const hooks = new Map<string, Listener[]>();
+  let context: { mode: string; isIdle: () => boolean; sessionManager: { getSessionId: () => string } } | undefined;
   const eventListeners = new Map<string, Array<(payload: unknown) => void>>();
   const pi = {
     getAllTools() { return []; },
@@ -78,11 +79,16 @@ test("the reviewed managed Herdr marker blocks the V2 reporter", async () => {
     expect(hooks.get("session_start")).toHaveLength(2);
     expect(eventListeners.get("herdr:blocked")).toHaveLength(1);
 
-    const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "session" } };
+    context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "session" } };
     for (const listener of hooks.get("session_start") ?? []) await listener({ reason: "startup" }, context);
-    await eventually(() => expect(requests.some((request) => request.method === "pane.report_agent")).toBe(true));
-    expect(requests.some((request) => request.method === "pane.report_metadata")).toBe(false);
+    await eventually(() => expect(requests.some((request) => request.method === "pane.report_metadata" && request.params.source === "herdr:pi-presence")).toBe(true));
+    const companion = requests.filter((request) => request.params.source === "herdr:pi-presence");
+    expect(companion.every((request) => request.method === "pane.report_metadata")).toBe(true);
+    expect(companion.every((request) => request.params.applies_to_source === "herdr:pi")).toBe(true);
+    expect(companion.every((request) => !("agent" in request.params) && !("title" in request.params) && !("clear_title" in request.params))).toBe(true);
   } finally {
+    if (context) for (const listener of hooks.get("session_shutdown") ?? []) await listener({}, context);
+    await new Promise(resolve => setTimeout(resolve, 5));
     for (const [key, value] of Object.entries(environment)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

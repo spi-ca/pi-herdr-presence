@@ -34,6 +34,7 @@ type InternalRuntime = {
   sequence: number;
   handleConsumerReady(payload: unknown): void;
   terminal: string;
+  mode: "standalone" | "companion" | "disabled";
   active: boolean;
   terminalRecords: unknown[];
   lastPiState: { state?: string; attention?: { reason?: string } } | null;
@@ -123,7 +124,7 @@ test("root and TUI gating leave no V2 consumer outside a root TUI session", asyn
   await runtime.shutdownSession((runtime as unknown as { context: object }).context);
 });
 
-test("a managed official integration keeps this observer wholly inactive", async () => {
+test("a managed official integration selects token-only companion mode", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-managed-v2-"));
   const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   try {
@@ -136,10 +137,11 @@ test("a managed official integration keeps this observer wholly inactive", async
       PI_CODING_AGENT_DIR: directory,
     });
     const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
-    await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
+    const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+    await runtime.startSession(context);
 
-    expect(internal(runtime).consumer).toBeNull();
-    expect(internal(runtime).localPi).toBeNull();
+    expect(internal(runtime).consumer).not.toBeNull();
+    expect(internal(runtime).mode).toBe("companion");
     await runtime.shutdownSession((runtime as unknown as { context: object }).context);
   } finally {
     restore(saved);
@@ -147,7 +149,24 @@ test("a managed official integration keeps this observer wholly inactive", async
   }
 });
 
-test("an absent managed file still leaves the local reporter inactive without sole-reporter opt-in", async () => {
+test("unknown managed-hook startup stays disabled", async () => {
+  const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, {
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: "/tmp/herdr-presence-no-socket",
+      HERDR_PANE_ID: "pane",
+      // Relative configured roots are deliberately ambiguous and fail closed.
+      PI_CODING_AGENT_DIR: "ambiguous-relative-root",
+    });
+    const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
+    const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+    await runtime.startSession(context);
+    expect(internal(runtime).consumer).toBeNull();
+  } finally { restore(saved); }
+});
+
+test("an absent managed file automatically activates standalone mode", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-absent-default-v2-"));
   const socket = join(directory, "socket");
   const server = await fakeSocket(socket, () => "");
@@ -161,8 +180,9 @@ test("an absent managed file still leaves the local reporter inactive without so
     });
     const runtime = new PresenceRuntime(makeBus() as never, resolvePresenceConfig());
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
-    expect(internal(runtime).consumer).toBeNull();
-    expect(internal(runtime).rootSession).toBe(false);
+    expect(internal(runtime).consumer).not.toBeNull();
+    expect(internal(runtime).rootSession).toBe(true);
+    expect(internal(runtime).mode).toBe("standalone");
     await runtime.shutdownSession((runtime as unknown as { context: object }).context);
   } finally {
     restore(saved);
@@ -171,7 +191,7 @@ test("an absent managed file still leaves the local reporter inactive without so
   }
 });
 
-test("runtime keeps static pane messages separate from fixed presentation plus nine-token metadata", async () => {
+test("runtime keeps safe pane messages separate from presentation and ten-token metadata", async () => {
   await withRuntime(async (_runtime, _bus, requests) => {
     await pause();
     const metadata = requests.filter((request) => request.method === "pane.report_metadata");
@@ -267,6 +287,29 @@ test("fresh event wrappers sharing the session_start manager and ID drive the li
     expect(internal(runtime).usage.snapshot()).toMatchObject({ contextPercent: 42 });
     expect(agentRequests(requests).every(request => request.params.agent_session_id === "root")).toBe(true);
   });
+});
+
+test("a new root session accepts a distinct Todo owner while stale callbacks stay fenced", async () => {
+  const bus = makeBus();
+  let tools: unknown[] = [{ name: "todo", sourceInfo: { path: "/session-a/todo", source: "project", scope: "project", origin: "top" } }];
+  bus.getAllTools = () => tools;
+  const todoResult = { toolName: "todo", isError: false, details: { action: "list", params: {}, nextId: 2, tasks: [{ id: 1, status: "pending" }] } };
+  await withRuntime(async (runtime) => {
+    const managerA = internal(runtime).sessionManager!;
+    const contextA = { sessionManager: managerA };
+    runtime.handleToolResult(todoResult, contextA);
+    expect(internal(runtime).lastTodoState).toMatchObject({ source: "todo", generation: 1 });
+
+    await runtime.shutdownSession(contextA);
+    tools = [{ name: "todo", sourceInfo: { path: "/session-b/todo", source: "project", scope: "project", origin: "top" } }];
+    const managerB = { getSessionId: () => "session-b" };
+    await runtime.startSession({ mode: "tui", sessionManager: managerB });
+    const beforeStale = internal(runtime).lastTodoState;
+    runtime.handleToolResult(todoResult, contextA);
+    expect(internal(runtime).lastTodoState).toBe(beforeStale);
+    runtime.handleToolResult(todoResult, { sessionManager: managerB });
+    expect(internal(runtime).lastTodoState).toMatchObject({ source: "todo", generation: 2 });
+  }, { ...resolvePresenceConfig(), soleReporter: true }, bus);
 });
 
 test("a stale manager with the same ID cannot mutate or shut down its replacement", async () => {
@@ -372,18 +415,28 @@ test("agent_end derives the terminal state and agent_settled settles it once", a
   });
 });
 
-test("consumer activation failure emits no socket output and only releases local handles", async () => {
+test("consumer activation failure emits no socket output and releases local handles", async () => {
   const claimant = createPresenceConsumer({ id: "pi-herdr-presence" })!;
   expect(claimant.activate()).toBe(true);
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-consumer-failure-"));
+  const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   try {
-    await withRuntime(async (runtime, _bus, requests) => {
-      expect(internal(runtime).consumerActive).toBe(false);
-      expect(internal(runtime).consumer).toBeNull();
-      expect(internal(runtime).localPi).toBeNull();
-      expect(requests).toEqual([]);
+    Object.assign(process.env, {
+      HERDR_ENV: "1",
+      HERDR_SOCKET_PATH: join(directory, "socket"),
+      HERDR_PANE_ID: "pane",
+      PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir"),
     });
+    const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
+    const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+    await runtime.startSession(context);
+    expect(internal(runtime).consumerActive).toBe(false);
+    expect(internal(runtime).consumer).toBeNull();
+    expect(internal(runtime).localPi).toBeNull();
   } finally {
     claimant.deactivate();
+    restore(saved);
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -456,7 +509,7 @@ test("a failed startup migration is isolated without retrying or suppressing the
   }
 });
 
-test("gated startup failure and input project in pane order without replay notifications", async () => {
+test("gated startup retains post-activation live input, paired failure, terminal, and blocked notifications", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-edges-"));
   const socket = join(directory, "socket");
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -488,6 +541,7 @@ test("gated startup failure and input project in pane order without replay notif
     expect(interaction.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } })).toBe(true);
     expect(subagent.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "error", attention: { reason: "failure", occurrence: "new" } })).toBe(true);
     expect(subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" })).toBe(true);
+    expect(subagent.publishState({ version: 2, generation: 1, sequence: 3, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } })).toBe(true);
     expect(requests.map((request) => request.method)).toEqual(["pane.report_metadata", "pane.report_metadata", "pane.report_agent_session"]);
 
     releaseSession();
@@ -505,9 +559,15 @@ test("gated startup failure and input project in pane order without replay notif
     expect(sessionIndex).toBeGreaterThan(legacyClearIndex);
     expect(agentIndex).toBeGreaterThan(sessionIndex);
     expect(metadataIndex).toBeGreaterThan(agentIndex);
-    // The retained input and paired failure/terminal edge remain metadata-only
-    // during startup and never create a notification.
-    expect(requests.filter((request) => request.method === "notification.show")).toHaveLength(0);
+    // Activation replay remains quiet, but these accepted events arrived after
+    // activate() returned. The paired state failure is suppressed by its live
+    // terminal, while input → terminal → blocked preserves arrival order.
+    const notices = requests.filter((request) => request.method === "notification.show");
+    expect(notices.map((request) => request.params)).toEqual([
+      { title: "Pi needs your input", body: "Pi needs your input", sound: "request" },
+      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
+      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
+    ]);
     const terminalTokens = requests
       .filter((request) => request.method === "pane.report_metadata")
       .map((request) => request.params.tokens as Record<string, string | null>)
@@ -582,12 +642,14 @@ test("repeated detached session starts retain only the latest queued transition"
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-coalesce-"));
   const socket = join(directory, "socket");
   const sessions: string[] = [];
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   let releaseSession!: () => void;
   const sessionGate = new Promise<void>((resolve) => { releaseSession = resolve; });
   let firstSeen!: () => void;
   const seenFirst = new Promise<void>((resolve) => { firstSeen = resolve; });
   const server = await fakeSocket(socket, async (line) => {
     const request = JSON.parse(line) as { id: string; method: string; params: Record<string, unknown> };
+    requests.push(request);
     if (request.method === "pane.report_agent_session") {
       sessions.push(request.params.agent_session_id as string);
       if (sessions.length === 1) { firstSeen(); await sessionGate; }
@@ -600,8 +662,10 @@ test("repeated detached session starts retain only the latest queued transition"
     Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     const starts = [runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "first" } })];
     await seenFirst;
+    let replacementContext: { mode: string; sessionManager: { getSessionId: () => string } } | undefined;
     for (let index = 0; index < 40; index += 1) {
-      starts.push(runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => `replacement-${index}` } }));
+      replacementContext = { mode: "tui", sessionManager: { getSessionId: () => `replacement-${index}` } };
+      starts.push(runtime.startSession(replacementContext));
     }
     expect((runtime as unknown as { queuedStartup: unknown }).queuedStartup).not.toBeNull();
     releaseSession();
@@ -686,6 +750,58 @@ test("detached lifecycle overflow drops the complete uncoalesced sequence", asyn
   expect(internal(runtime).pendingLifecycle).toMatchObject({ overflow: true, edges: [] });
   await starting;
   await runtime.shutdownSession((runtime as unknown as { context: object }).context);
+});
+
+test("stalled startup overflow fails closed while projecting final state and teardown fences producers", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-overflow-"));
+  const socket = join(directory, "socket");
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let releaseReport!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  let reportSeen!: () => void;
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as { id: string; method: string; params: Record<string, unknown> };
+    requests.push(request);
+    if (request.method === "pane.report_agent") { reportSeen(); await reportGate; }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const producer = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
+    await seenReport;
+    expect(producer.activate()).toBe(true);
+    for (let sequence = 1; sequence <= 65; sequence += 1) {
+      expect(producer.publishState({ version: 2, generation: 1, sequence, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } })).toBe(true);
+    }
+    expect(producer.publishTerminal({ version: 2, generation: 1, sequence: 66, source: "subagent", eventId: 1, outcome: "failed" })).toBe(true);
+    releaseReport();
+    await starting;
+    await pause();
+
+    expect(requests.filter(request => request.method === "notification.show")).toHaveLength(0);
+    expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked" });
+    const latest = requests.filter(request => request.method === "pane.report_metadata" && "title" in request.params).at(-1)?.params.tokens as Record<string, string | null>;
+    expect(latest).toMatchObject({ v2_attention: "blocked:new", v2_terminals: "subagent:1:1:failed" });
+
+    await runtime.shutdownSession(activeContext(runtime));
+    const afterTeardown = requests.length;
+    producer.publishState({ version: 2, generation: 1, sequence: 67, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } });
+    await pause();
+    expect(requests).toHaveLength(afterTeardown);
+  } finally {
+    releaseReport?.();
+    producer.deactivate();
+    await runtime.shutdownSession((runtime as unknown as { context: object }).context);
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("shutdown synchronously fences same-tick V2 ingress and notification output", async () => {

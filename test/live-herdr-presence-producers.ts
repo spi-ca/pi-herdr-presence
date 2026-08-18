@@ -17,7 +17,6 @@ import { registerPresenceHooks } from "../src/hooks.js";
 assert.equal(process.env.HERDR_ENV, "1", "requires HERDR_ENV=1");
 assert.ok(process.env.HERDR_SOCKET_PATH, "requires HERDR_SOCKET_PATH");
 assert.ok(process.env.HERDR_PANE_ID, "requires HERDR_PANE_ID");
-assert.equal(process.env.PI_HERDR_PRESENCE_SOLE_REPORTER, "1", "requires PI_HERDR_PRESENCE_SOLE_REPORTER=1");
 const realSocketPath = process.env.HERDR_SOCKET_PATH!;
 const askUserRoot = process.env.PI_ASK_USER_ROOT ?? new URL("../../pi-ask-user/", import.meta.url).pathname;
 const subagentRoot = process.env.PI_SUBAGENT_ROOT ?? new URL("../../pi-subagent/", import.meta.url).pathname;
@@ -199,7 +198,7 @@ try {
       && projected.v2_subagents === "0,0,0,1,0,0,0";
   }, true);
   const tokens = terminalMetadata.params.tokens as Record<string, string | null>;
-  assert.deepEqual(Object.keys(tokens), ["v2_progress", "v2_attention", "v2_interaction", "v2_subagents", "v2_terminals", "v2_terminal_overflow", "tokens", "cost", "context"]);
+  assert.deepEqual(Object.keys(tokens), ["summary", "v2_progress", "v2_attention", "v2_interaction", "v2_subagents", "v2_terminals", "v2_terminal_overflow", "tokens", "cost", "context"]);
   assert.equal(terminalMetadata.params.title, "Pi");
   assert.equal(terminalMetadata.params.display_agent, "Pi");
   assert.deepEqual(terminalMetadata.params.state_labels, { idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" });
