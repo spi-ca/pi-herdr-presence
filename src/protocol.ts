@@ -16,7 +16,7 @@ export const HERDR_LEGACY_METADATA_TOKEN_KEYS = ["active", "completed", "failed"
 export type HerdrMetadataTokens = Record<(typeof HERDR_METADATA_TOKEN_KEYS)[number], string | null>;
 export type HerdrLegacyMetadataTokens = Record<(typeof HERDR_LEGACY_METADATA_TOKEN_KEYS)[number], null>;
 export type HerdrPresentation = { displayAgent: string; labels: Record<"idle" | "working" | "blocked" | "unknown", string> };
-/** Standalone title is derived only from the validated, bounded summary token. */
+/** Both active modes derive the title only from the validated, bounded summary token. */
 export const titleForSummary = (summary: string | null): string => `Pi · ${summary ?? ""}`;
 /** Display agent and state labels are fixed; no runtime context reaches them. */
 export const HERDR_FIXED_PRESENTATION: HerdrPresentation = Object.freeze({
@@ -24,7 +24,8 @@ export const HERDR_FIXED_PRESENTATION: HerdrPresentation = Object.freeze({
  labels: Object.freeze({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" }),
 });
 const METADATA_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "agent", "seq", "title", "display_agent", "state_labels", "tokens"] as const;
-const COMPANION_METADATA_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "seq", "tokens"] as const;
+const COMPANION_METADATA_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "seq", "title", "display_agent", "state_labels", "tokens"] as const;
+const COMPANION_METADATA_CLEAR_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "seq", "clear_title", "clear_display_agent", "clear_state_labels", "tokens"] as const;
 const METADATA_CLEAR_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "agent", "seq", "clear_title", "clear_display_agent", "clear_state_labels", "tokens"] as const;
 const METADATA_LEGACY_CLEAR_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "agent", "seq", "tokens"] as const;
 const AGENT_AUTHORITY_CLEAR_PARAM_KEYS = ["pane_id", "source", "seq"] as const;
@@ -51,7 +52,7 @@ const canonicalProgress = (value: unknown): value is string => {
 const canonicalAttention = (value: unknown): value is string => typeof value === "string" && ATTENTION_REASONS.some(reason => value === `${reason}:new` || value === `${reason}:retained`);
 const canonicalInteraction = (value: unknown): value is string => typeof value === "string" && value.startsWith("ask_user:") && canonicalInteger(value.slice("ask_user:".length));
 const canonicalSubagents = (value: unknown): value is string => typeof value === "string" && value.split(",").length === 7 && value.split(",").every(part => canonicalInteger(part));
-/** Standalone pane chrome accepts fixed display fields and a summary-derived title. */
+/** Pane chrome accepts only fixed display fields and a summary-derived title. */
 const exactPresentation = (value: unknown): value is Record<string, unknown> => isPlainObject(value)
  && own(value, ["idle", "working", "blocked", "unknown"], ["idle", "working", "blocked", "unknown"])
  && value.idle === HERDR_FIXED_PRESENTATION.labels.idle
@@ -113,7 +114,7 @@ const exactMetadataTokens = (value: unknown): value is HerdrMetadataTokens => {
 };
 const sessionRef = (p:Record<string,unknown>) => safeText(p.agent_session_id,128) && p.agent_session_path === undefined;
 /** Validates Herdr v8's safe presentation and complete V2 token patch. */
-/** Companion is token-only: it cannot alter managed presentation or authority. */
+/** Companion owns the same fixed presentation projection without managed agent authority. */
 export function isExactCompanionMetadataParams(value: unknown): value is Record<string, unknown> & { tokens: HerdrMetadataTokens } {
  const p = value as Record<string, unknown>;
  return isPlainObject(value)
@@ -123,17 +124,21 @@ export function isExactCompanionMetadataParams(value: unknown): value is Record<
   && p.applies_to_source === LIFECYCLE_SOURCE
   && Number.isSafeInteger(p.seq)
   && (p.seq as number) >= 0
-  && exactMetadataTokens(p.tokens);
+  && p.display_agent === HERDR_FIXED_PRESENTATION.displayAgent
+  && exactPresentation(p.state_labels)
+  && exactMetadataTokens(p.tokens)
+  && p.title === titleForSummary(p.tokens.summary);
 }
 export function isExactCompanionMetadataClearParams(value: unknown): value is Record<string, unknown> & { tokens: Record<string, null> } {
  const p = value as Record<string, unknown>;
  return isPlainObject(value)
-  && own(p, COMPANION_METADATA_PARAM_KEYS, COMPANION_METADATA_PARAM_KEYS)
+  && own(p, COMPANION_METADATA_CLEAR_PARAM_KEYS, COMPANION_METADATA_CLEAR_PARAM_KEYS)
   && safeText(p.pane_id, 256)
   && p.source === COMPANION_METADATA_SOURCE
   && p.applies_to_source === LIFECYCLE_SOURCE
   && Number.isSafeInteger(p.seq)
   && (p.seq as number) >= 0
+  && p.clear_title === true && p.clear_display_agent === true && p.clear_state_labels === true
   && isPlainObject(p.tokens)
   && exactOwnedTokens(p.tokens as Record<string, unknown>)
   && Object.values(p.tokens).every(token => token === null);

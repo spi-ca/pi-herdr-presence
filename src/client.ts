@@ -32,7 +32,7 @@ export class PresenceClient {
     const seq=this.next();
     if(seq===undefined)return;
     const params = this.companion
-      ? { pane_id:this.identity.paneId, source:this.metadataSource, applies_to_source:LIFECYCLE_SOURCE, seq, tokens }
+      ? { pane_id:this.identity.paneId, source:this.metadataSource, applies_to_source:LIFECYCLE_SOURCE, seq, title:titleForSummary(tokens.summary), display_agent:presentation.displayAgent, state_labels:presentation.labels, tokens }
       : { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, title:titleForSummary(tokens.summary), display_agent:presentation.displayAgent, state_labels:presentation.labels, tokens };
     await this.send("pane.report_metadata", params, "metadata");
   }
@@ -61,7 +61,7 @@ export class PresenceClient {
   }
   /** Explicitly clear every owned presentation field and null every fixed token. */
   async clearMetadata(): Promise<void> { await this.clearCurrentMetadata("metadata-clear"); }
-  private async clearCurrentMetadata(key:string, retry=true): Promise<void> { const seq=this.next(); if(seq===undefined)return; const tokens=Object.fromEntries(OWNED_METADATA_TOKENS.map((token)=>[token,null])); const params=this.companion ? { pane_id:this.identity.paneId, source:this.metadataSource, applies_to_source:LIFECYCLE_SOURCE, seq, tokens } : { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens }; await this.send("pane.report_metadata", params, key, true, retry, true); }
+  private async clearCurrentMetadata(key:string, retry=true): Promise<void> { const seq=this.next(); if(seq===undefined)return; const tokens=Object.fromEntries(OWNED_METADATA_TOKENS.map((token)=>[token,null])); const params=this.companion ? { pane_id:this.identity.paneId, source:this.metadataSource, applies_to_source:LIFECYCLE_SOURCE, seq, clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens } : { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens }; await this.send("pane.report_metadata", params, key, true, retry, true); }
   /** Teardown repeats the exact legacy chunk only for standalone ownership. */
   private async clearLegacyMetadataOnTeardown(): Promise<void> { if(this.companion)return; const seq=this.next(); if(seq===undefined)return; await this.send("pane.report_metadata", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, tokens:Object.fromEntries(LEGACY_METADATA_TOKENS.map((token)=>[token,null])) }, "metadata-teardown-legacy-clear", true, false, true); }
   /** A visible toast has unknown delivery after dispatch, so it is never retried. */

@@ -14,12 +14,19 @@ test("strictly encodes known Herdr methods and response envelopes",()=>{
  expect(()=>encodeHerdrRequest({id:"notice",method:"notification.show",params:{title:"Pi",body:"Done",sound:"done",priority:"high"}} as never)).toThrow();
  expect(()=>encodeHerdrRequest({id:"s",method:"pane.report_agent_session",params:{pane_id:"p",source:"other",agent:"pi",seq:1,agent_session_id:"session"}})).toThrow();
  expect(isExactMetadataIngressParams(metadataParams)).toBe(true);
- const companionParams = { pane_id:"p", source:"herdr:pi-presence", applies_to_source:"herdr:pi", seq:1, tokens:{...nullMetadataTokens,summary:"idle"} };
+ const companionParams = { pane_id:"p", source:"herdr:pi-presence", applies_to_source:"herdr:pi", seq:1, title:"Pi · idle", display_agent:"Pi", state_labels:{idle:"Pi is idle",working:"Pi is working",blocked:"Pi needs attention",unknown:"Pi state unknown"}, tokens:{...nullMetadataTokens,summary:"idle"} };
+ const companionClearParams = { pane_id:"p", source:"herdr:pi-presence", applies_to_source:"herdr:pi", seq:1, clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens:nullMetadataTokens };
  expect(isExactCompanionMetadataParams(companionParams)).toBe(true);
  expect(encodeHerdrRequest({id:"companion",method:"pane.report_metadata",params:companionParams})).toContain('"herdr:pi-presence"');
  expect(isExactCompanionMetadataParams({...companionParams,agent:"pi"})).toBe(false);
  expect(isExactCompanionMetadataParams({...companionParams,title:"Pi"})).toBe(false);
- expect(isExactCompanionMetadataClearParams({...companionParams,tokens:nullMetadataTokens})).toBe(true);
+ expect(isExactCompanionMetadataParams({...companionParams,display_agent:"worker-42"})).toBe(false);
+ expect(isExactCompanionMetadataParams({...companionParams,state_labels:{...companionParams.state_labels,idle:"Waiting on /private/task"}})).toBe(false);
+ expect(isExactCompanionMetadataParams({...companionParams,tokens:{...companionParams.tokens,summary:"idle\u0000"}})).toBe(false);
+ expect(isExactCompanionMetadataParams({...companionParams,tokens:{...companionParams.tokens,extra:null}})).toBe(false);
+ expect(isExactCompanionMetadataClearParams(companionClearParams)).toBe(true);
+ expect(isExactCompanionMetadataClearParams({...companionClearParams,clear_title:false})).toBe(false);
+ expect(isExactCompanionMetadataClearParams({...companionClearParams,title:"Pi · idle"})).toBe(false);
  expect(encodeHerdrRequest({id:"m",method:"pane.report_metadata",params:metadataParams})).toContain('"v2_progress":null');
  for (const invalid of [
   { ...metadataParams, title: "Pi · working" },
@@ -46,6 +53,7 @@ test("strictly encodes known Herdr methods and response envelopes",()=>{
   const invalid={...metadataParams,[field]:undefined};
   expect(isExactMetadataIngressParams(invalid)).toBe(false);
   expect(()=>encodeHerdrRequest({id:"m",method:"pane.report_metadata",params:invalid})).toThrow();
+  expect(isExactCompanionMetadataParams({...companionParams,[field]:undefined})).toBe(false);
  }
  expect(()=>encodeHerdrRequest({id:"m",method:"pane.report_metadata",params:{...metadataParams,seq:undefined}} as never)).toThrow();
  expect(()=>encodeHerdrRequest({id:"m",method:"pane.report_metadata",params:{...metadataParams,tokens:{...nullMetadataTokens,extra:null}}})).toThrow();

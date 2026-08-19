@@ -71,7 +71,7 @@ test("live metadata is queued before a best-effort toast behind an active agent 
   }
 });
 
-test("companion emits a policy-eligible static notification while retaining exact token-only metadata", async () => {
+test("companion emits a policy-eligible static notification with exact presentation metadata and no authority calls", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-v2-companion-notice-"));
   const agentDirectory = join(directory, "agent");
   const socketPath = join(directory, "socket");
@@ -111,11 +111,17 @@ test("companion emits a policy-eligible static notification while retaining exac
       expect(request.method).toBe("pane.report_metadata");
       expect(isExactCompanionMetadataParams(request.params) || isExactCompanionMetadataClearParams(request.params)).toBe(true);
       expect(request.params).toMatchObject({ source: "herdr:pi-presence", applies_to_source: "herdr:pi" });
-      for (const field of ["agent", "agent_session_id", "session_start_source", "state", "message", "title", "display_agent", "state_labels", "clear_title", "clear_display_agent", "clear_state_labels", "focus", "control"]) {
+      for (const field of ["agent", "agent_session_id", "session_start_source", "state", "message", "focus", "control"]) {
         expect(request.params).not.toHaveProperty(field);
+      }
+      if (isExactCompanionMetadataParams(request.params)) {
+        expect(request.params).toMatchObject({ title: `Pi · ${(request.params.tokens as Record<string, unknown>).summary}`, display_agent: "Pi", state_labels: { idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" } });
+      } else {
+        expect(request.params).toMatchObject({ clear_title: true, clear_display_agent: true, clear_state_labels: true });
       }
       expect(Object.keys(request.params.tokens as object)).not.toContain("active");
     }
+    expect(requests.some(request => ["pane.report_agent", "pane.report_agent_session", "pane.clear_agent_authority"].includes(request.method))).toBe(false);
   } finally {
     producer?.deactivate();
     await runtime.shutdownSession((runtime as unknown as { context: object }).context);

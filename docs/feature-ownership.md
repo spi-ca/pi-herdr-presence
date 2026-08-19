@@ -4,9 +4,9 @@
 
 Standalone owns local `herdr:pi` authority. It clears its current presentation/token projection and the separate legacy token projection before reporting session, state, and metadata; teardown repeats those cleanup envelopes and may clear authority before its deadline.
 
-Companion coexists with the managed authority. It owns only its bounded ten-token metadata projection under `herdr:pi-presence`, applied to `herdr:pi`; startup and teardown clear only that projection, and policy-gated static notifications remain permitted. It never emits session/state authority, presentation, legacy cleanup, authority clear, focus/control, or arbitrary text.
+Companion coexists with the managed authority. Under `herdr:pi-presence`, applied to `herdr:pi`, it owns its bounded exact ten-token metadata and fixed presentation projection; startup and teardown clear only that presentation/token metadata, and policy-gated static notifications remain permitted. It never claims, reports, or clears session or lifecycle authority, and never emits legacy cleanup, authority clear, focus/control, or arbitrary text.
 
-Standalone title is exactly `Pi · ${summary}`, derived only from the bounded safe `summary` token; display agent and state labels remain fixed. Companion emits no title. The extension does not read or project cwd, prompts, session names or paths, task/subagent arguments, output, arbitrary producer identifiers, or raw errors. It uses only fixed display text and bounded metadata.
+In both modes, the title is exactly `Pi · ${summary}`, derived only from the bounded safe `summary` token; `display_agent` is fixed to `Pi` and `state_labels` are fixed. The extension does not read or project cwd, prompts, session names or paths, task/subagent arguments, output, arbitrary producer identifiers, or raw errors. It uses only fixed display text and bounded metadata.
 
 Terminal records are retained briefly. Their canonical `v2_terminals` encoding remains independent from the transient summary: the summary follows the latest accepted arrival and adds `terminal completed`, `terminal cancelled`, or `terminal failed` only while blocked, input, and failure state do not take precedence. Both clear together.
 
