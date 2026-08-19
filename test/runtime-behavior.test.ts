@@ -17,7 +17,7 @@ type Bus = {
 };
 
 const pause = (milliseconds = 100) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const environmentKeys = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"] as const;
+const environmentKeys = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "PI_CODING_AGENT_DIR"] as const;
 
 function bus(): Bus {
   const listeners = new Map<string, Listener[]>();
@@ -69,7 +69,7 @@ async function withRuntime(
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: socket,
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir"),
     });
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
@@ -100,7 +100,7 @@ test("retained V2 state is consumed once and consumer-ready does not recurse thr
   const retained = createPresenceProducer({ source: "subagent", emit: (name: string, payload: unknown) => events.events.emit(name, payload) })!;
   let runtime: PresenceRuntime | undefined;
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing") });
     expect(retained.activate()).toBe(true);
     expect(retained.publishState({
       version: 2,

@@ -7,6 +7,7 @@ import { ExternalAttentionTransitions, NotificationDeduper, NotificationRateLimi
 import { officialHookStatus } from "./official-hook.js";
 import { processCoordinator } from "./process-coordinator.js";
 import { attentionText, compositeState, isInteractionWaiting, isLiveInputRequest, metadata, presentation, safeMessage } from "./presentation.js";
+import { WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS } from "./protocol.js";
 import { HerdrSocketTransport } from "./transport.js";
 import { TodoProgressAdapter } from "./todo.js";
 import { UsageTracker } from "./usage.js";
@@ -176,6 +177,9 @@ export class PresenceRuntime {
   private usage = new UsageTracker();
   /** Fixed TTL for the current bounded terminal batch; bursts never extend it. */
   private terminalClearTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The workspace lease is observer-only and independently paced below its fixed TTL. */
+  private workspaceHeartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+  private workspaceSummary: string | null = null;
   private longRunningTimer: ReturnType<typeof setTimeout> | undefined;
   private externalAttention = new ExternalAttentionTransitions();
   private notifications = new NotificationDeduper();
@@ -187,6 +191,9 @@ export class PresenceRuntime {
   constructor(private pi: ExtensionAPI, private config: PresenceConfig) {}
 
   async startSession(context: unknown, event?: unknown) {
+    // A replacement must fence ordinary client output synchronously, before its
+    // teardown waits in the authority lane. Cleanup remains explicitly allowed.
+    this.client?.fenceOrdinaryOutput();
     const epoch = ++this.epoch;
     // A session boundary permits a distinct Todo implementation in the new root.
     this.todo.reset();
@@ -342,6 +349,10 @@ export class PresenceRuntime {
     // No await may separate the clean-pass check from this release.
     this.outputReady = true;
     this.initialProjectionInFlight = false;
+    // Publish the workspace lease immediately, then refresh below its TTL. It
+    // never owns a clear path, so failed/ineligible snapshots simply expire.
+    await this.publishWorkspaceMainSummary();
+    this.startWorkspaceHeartbeat();
     // Retained terminals get their normal bounded metadata lifetime, but never a toast.
     this.scheduleTerminalClear();
     // Consumer activation may synchronously replay retained V2 state. It is
@@ -687,6 +698,8 @@ export class PresenceRuntime {
     // ordinary callbacks, /fork may mutate the legitimate owner's ID before
     // Pi emits shutdown, so this fence intentionally checks manager + epoch.
     if (!this.shutdownSessionFence(context) && !this.pendingShutdownFence(context)) return;
+    // Fence in-flight workspace eligibility before queued teardown can run.
+    this.client?.fenceOrdinaryOutput();
     ++this.epoch;
     this.ingressEpoch = null;
     this.outputReady = false;
@@ -809,7 +822,9 @@ export class PresenceRuntime {
     const state = compositeState(events, this.active);
     const terminals = this.currentTerminalBatch();
     if (this.mode === "standalone") await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
-    await client.metadata(presentation(), metadata(events, terminals, this.usage.snapshot(), this.active, state, this.latestTerminalOutcome()));
+    const tokens = metadata(events, terminals, this.usage.snapshot(), this.active, state, this.latestTerminalOutcome());
+    this.rememberWorkspaceSummary(tokens.summary);
+    await client.metadata(presentation(), tokens);
   }
 
   private render(attention?: PresenceStateV2) {
@@ -827,8 +842,35 @@ export class PresenceRuntime {
   /** Metadata-only refreshes must not repeat an unchanged pane agent report. */
   private renderMetadata(events = [...this.states.values()], client = this.client, state = compositeState(events, this.active)) {
     if (!this.canOutput() || !client) return;
-    void client.metadata(presentation(), metadata(events, this.currentTerminalBatch(), this.usage.snapshot(), this.active, state, this.latestTerminalOutcome()));
+    const tokens = metadata(events, this.currentTerminalBatch(), this.usage.snapshot(), this.active, state, this.latestTerminalOutcome());
+    this.rememberWorkspaceSummary(tokens.summary);
+    void client.metadata(presentation(), tokens);
   }
+
+  private rememberWorkspaceSummary(summary: string | null) { this.workspaceSummary = summary; }
+  private async publishWorkspaceMainSummary() {
+    const summary = this.workspaceSummary;
+    const client = this.client;
+    if (!this.config.metadata || !this.canOutput() || !summary || !client) return;
+    await client.workspaceMainSummary(summary);
+  }
+  private startWorkspaceHeartbeat() {
+    this.clearWorkspaceHeartbeat();
+    if (!this.config.metadata || !this.workspaceSummary) return;
+    const epoch = this.epoch;
+    const schedule = () => {
+      const timer = setTimeout(async () => {
+        if (this.workspaceHeartbeatTimer !== timer || epoch !== this.epoch) return;
+        this.workspaceHeartbeatTimer = undefined;
+        await this.publishWorkspaceMainSummary();
+        if (epoch === this.epoch && this.canOutput()) schedule();
+      }, WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS);
+      timer.unref?.();
+      this.workspaceHeartbeatTimer = timer;
+    };
+    schedule();
+  }
+  private clearWorkspaceHeartbeat() { if (this.workspaceHeartbeatTimer) clearTimeout(this.workspaceHeartbeatTimer); this.workspaceHeartbeatTimer = undefined; }
 
   /** Applies one already-accepted live state edge without re-rendering startup state. */
   private dispatchStateAttention(attention?: PresenceStateV2, deferFailure = true, immediateExternal = false) {
@@ -1095,6 +1137,8 @@ export class PresenceRuntime {
 
   private teardownLocal() {
     this.clearTerminalClearTimer();
+    this.clearWorkspaceHeartbeat();
+    this.workspaceSummary = null;
     this.clearPendingNotifications();
     this.initialProjectionInFlight = false;
     this.initialProjectionDirty = false;

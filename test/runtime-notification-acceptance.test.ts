@@ -23,7 +23,7 @@ test("live metadata is queued before a best-effort toast behind an active agent 
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-v2-live-order-"));
   const socketPath = join(directory, "socket");
   const requests: Request[] = [];
-  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
+  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
   const listeners = new Map<string, Array<(payload: unknown) => void>>();
   const events = {
     on(name: string, listener: (payload: unknown) => void) { listeners.set(name, [...(listeners.get(name) ?? []), listener]); },
@@ -46,7 +46,7 @@ test("live metadata is queued before a best-effort toast behind an active agent 
   const runtime = new PresenceRuntime({ getAllTools: () => [], events } as never, { ...resolvePresenceConfig(), soleReporter: true, maxQueue: 1 });
   let producer: ReturnType<typeof createPresenceProducer> | undefined;
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "absent") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "absent") });
     for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) events.on(name, payload => runtime.handlePresenceEvent(name, payload));
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
     requests.length = 0;
@@ -76,7 +76,7 @@ test("companion emits a policy-eligible static notification with exact presentat
   const agentDirectory = join(directory, "agent");
   const socketPath = join(directory, "socket");
   const requests: Request[] = [];
-  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
+  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
   const listeners = new Map<string, Array<(payload: unknown) => void>>();
   const events = {
     on(name: string, listener: (payload: unknown) => void) { listeners.set(name, [...(listeners.get(name) ?? []), listener]); },
@@ -94,7 +94,7 @@ test("companion emits a policy-eligible static notification with exact presentat
   try {
     await fs.mkdir(join(agentDirectory, "extensions"), { recursive: true });
     await fs.writeFile(join(agentDirectory, "extensions", "herdr-agent-state.ts"), "HERDR_INTEGRATION_ID=pi");
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: agentDirectory });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: agentDirectory });
     for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) events.on(name, payload => runtime.handlePresenceEvent(name, payload));
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
 
@@ -105,8 +105,9 @@ test("companion emits a policy-eligible static notification with exact presentat
 
     const notices = requests.filter(request => request.method === "notification.show");
     expect(notices.map(request => request.params)).toEqual([{ title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" }]);
-    const metadata = requests.filter(request => request.method !== "notification.show");
+    const metadata = requests.filter(request => request.method === "pane.report_metadata");
     expect(metadata).not.toHaveLength(0);
+    expect(requests.some(request => request.method === "pane.list" && request.params.workspace_id === "workspace")).toBe(true);
     for (const request of metadata) {
       expect(request.method).toBe("pane.report_metadata");
       expect(isExactCompanionMetadataParams(request.params) || isExactCompanionMetadataClearParams(request.params)).toBe(true);
@@ -135,7 +136,7 @@ test("V2 live terminal failure, blocked attention, and input each deliver one bo
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-v2-notice-"));
   const socketPath = join(directory, "socket");
   const requests: Request[] = [];
-  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
+  const saved = Object.fromEntries(["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "PI_CODING_AGENT_DIR"].map(key => [key, process.env[key]]));
   const listeners = new Map<string, Array<(payload: unknown) => void>>();
   const events = {
     on(name: string, listener: (payload: unknown) => void) { listeners.set(name, [...(listeners.get(name) ?? []), listener]); },
@@ -148,7 +149,7 @@ test("V2 live terminal failure, blocked attention, and input each deliver one bo
   });
   const runtime = new PresenceRuntime({ getAllTools: () => [], events } as never, { ...{ ...resolvePresenceConfig(), soleReporter: true }, maxQueue: 128 });
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "absent") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "absent") });
     for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) events.on(name, payload => runtime.handlePresenceEvent(name, payload));
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
 

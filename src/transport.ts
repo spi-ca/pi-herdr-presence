@@ -34,25 +34,36 @@ async function exchange(endpoint: string, line: string, timeoutMs: number, signa
   }catch(e){finish(e instanceof Error?e:new PresenceTransportError("Socket validation failed."));}})();
  });
 }
-interface Pending { key?:string; work:(s:AbortSignal)=>Promise<string>; promise:Promise<string>; resolve:(v:string)=>void; reject:(e:unknown)=>void; settled:boolean; }
+interface Pending { key?:string; work:(s:AbortSignal)=>Promise<string>; promise:Promise<string>; resolve:(v:string)=>void; reject:(e:unknown)=>void; settled:boolean; deadlineAt?:number; timer?:ReturnType<typeof setTimeout>; }
 type Active = { control:AbortController; item:Pending };
-/** A bounded latest-write-wins queue. Superseded callers settle immediately. */
+/** A bounded latest-write-wins queue with optional end-to-end deadlines. Superseded callers settle immediately. */
 export class BoundedSocketQueue {
  private queue:Pending[]=[]; private keyed=new Map<string,Pending>(); private active:Active|null=null; private closed=false; private drainPromise:Promise<void>|null=null;
  constructor(private readonly limit:number){}
- private resolve(item:Pending,value:string){if(item.settled)return;item.settled=true;item.resolve(value);}
- private reject(item:Pending,error:unknown){if(item.settled)return;item.settled=true;item.reject(error);}
+ private clearDeadline(item:Pending){if(item.timer)clearTimeout(item.timer);item.timer=undefined;}
+ private resolve(item:Pending,value:string){if(item.settled)return;item.settled=true;this.clearDeadline(item);item.resolve(value);}
+ private reject(item:Pending,error:unknown){if(item.settled)return;item.settled=true;this.clearDeadline(item);item.reject(error);}
  private failed(error:Error):Promise<string>{const promise=Promise.reject<string>(error);void promise.catch(()=>{});return promise;}
- enqueue(work:(s:AbortSignal)=>Promise<string>,key?:string,priority=false):Promise<string>{
+ private expire(item:Pending){
+  if(item.settled)return;
+  const active=this.active;
+  if(active?.item===item){active.control.abort();this.reject(item,new PresenceTransportError("Socket request timed out."));return;}
+  const index=this.queue.indexOf(item);
+  if(index<0)return;
+  this.queue.splice(index,1);if(item.key&&this.keyed.get(item.key)===item)this.keyed.delete(item.key);this.reject(item,new PresenceTransportError("Socket request timed out."));
+ }
+ enqueue(work:(s:AbortSignal)=>Promise<string>,key?:string,priority=false,deadlineAt?:number):Promise<string>{
   if(this.closed)return this.failed(new PresenceTransportError("Socket queue is closed."));
   const prior=key?this.keyed.get(key):undefined;
   if(prior){const index=this.queue.indexOf(prior);if(index>=0)this.queue.splice(index,1);this.keyed.delete(key!);this.reject(prior,new PresenceTransportError("Socket queue coalesced by newer request."));}
   if(priority){for(const displaced of this.queue.splice(0)){if(displaced.key)this.keyed.delete(displaced.key);this.reject(displaced,new PresenceTransportError("Socket queue displaced by priority cleanup."));}}
   else if(this.queue.length>=this.limit)return this.failed(new PresenceTransportError("Socket queue is full."));
-  let resolve!:Pending["resolve"],reject!:Pending["reject"];const promise=new Promise<string>((r,j)=>{resolve=r;reject=j});void promise.catch(()=>{});const item:Pending={key,work,promise,resolve,reject,settled:false};if(priority)this.queue.unshift(item);else this.queue.push(item);if(key)this.keyed.set(key,item);this.start();return promise;
+  let resolve!:Pending["resolve"],reject!:Pending["reject"];const promise=new Promise<string>((r,j)=>{resolve=r;reject=j});void promise.catch(()=>{});const item:Pending={key,work,promise,resolve,reject,settled:false,deadlineAt};
+  if(deadlineAt!==undefined){item.timer=setTimeout(()=>this.expire(item),Math.max(0,deadlineAt-Date.now()));item.timer.unref?.();}
+  if(priority)this.queue.unshift(item);else this.queue.push(item);if(key)this.keyed.set(key,item);this.start();return promise;
  }
  private start(){if(!this.drainPromise)this.drainPromise=this.drain().finally(()=>{this.drainPromise=null;if(this.queue.length&&!this.closed)this.start();});}
- private async drain(){while(!this.closed&&this.queue.length){const item=this.queue.shift()!;if(item.key)this.keyed.delete(item.key);const active={control:new AbortController,item};this.active=active;try{this.resolve(item,await item.work(active.control.signal));}catch(e){this.reject(item,e);}finally{if(this.active===active)this.active=null;}}}
+ private async drain(){while(!this.closed&&this.queue.length){const item=this.queue.shift()!;if(item.key)this.keyed.delete(item.key);if(item.deadlineAt!==undefined&&item.deadlineAt<=Date.now()){this.reject(item,new PresenceTransportError("Socket request timed out."));continue;}const active={control:new AbortController,item};this.active=active;try{this.resolve(item,await item.work(active.control.signal));}catch(e){this.reject(item,e);}finally{if(this.active===active)this.active=null;}}}
  async close(timeoutMs=0){
   if(this.closed)return;this.closed=true;
   const active=this.active;if(active){active.control.abort();this.reject(active.item,new PresenceTransportError("Socket queue closed during active work."));if(this.active===active)this.active=null;}
@@ -67,4 +78,4 @@ export class BoundedSocketQueue {
   if(timer)clearTimeout(timer);
  }
 }
-export class HerdrSocketTransport { private queue:BoundedSocketQueue; constructor(private endpoint:string,private timeoutMs:number,maxQueue:number,private readonly fingerprint:(candidate:string)=>Promise<SocketFingerprint>=safeSocketFingerprint){this.queue=new BoundedSocketQueue(maxQueue)} request(line:string,key?:string,priority=false,timeoutMs=this.timeoutMs){return this.queue.enqueue(s=>exchange(this.endpoint,line,timeoutMs,s,this.fingerprint),key,priority)} close(timeoutMs=this.timeoutMs){return this.queue.close(timeoutMs)} }
+export class HerdrSocketTransport { private queue:BoundedSocketQueue; constructor(private endpoint:string,private timeoutMs:number,maxQueue:number,private readonly fingerprint:(candidate:string)=>Promise<SocketFingerprint>=safeSocketFingerprint){this.queue=new BoundedSocketQueue(maxQueue)} request(line:string,key?:string,priority=false,timeoutMs=this.timeoutMs){const deadlineAt=Date.now()+timeoutMs;return this.queue.enqueue(s=>exchange(this.endpoint,line,Math.max(0,deadlineAt-Date.now()),s,this.fingerprint),key,priority,deadlineAt)} close(timeoutMs=this.timeoutMs){return this.queue.close(timeoutMs)} }

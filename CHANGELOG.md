@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Workspace presence now requires an explicit opaque `HERDR_WORKSPACE_ID`, validates a scoped bounded, schema-faithful `pane.list`, and leases canonical `main_summary` from `herdr:pi-presence` only when this is the workspace's sole reported/detected Pi pane. Herdr `PaneInfo.agent` may be absent or `null`; only `agent: "pi"` counts. The 30-second lease attempts a refresh 10 seconds after completion, with fixed no-retry request budgets, and is never destructively cleared.
+
 - Managed-hook detection now selects fail-closed automatic modes: exact managed presence uses `herdr:pi-presence` companion coexistence, exact absence uses standalone `herdr:pi` authority, and ambiguous probes disable output. `PI_HERDR_PRESENCE_SOLE_REPORTER` remains compatible but no longer gates standalone activation.
 - Companion mode now applies the same fixed `Pi · ${summary}` title, fixed `display_agent`/`state_labels`, and exact ten-token metadata map under `herdr:pi-presence` to managed `herdr:pi`; it clears only that presentation/token metadata and may emit policy-gated static notifications. It never claims, reports, or clears session/lifecycle authority, legacy metadata, authority, focus/control, or arbitrary text.
 - Terminal summaries now retain semantic `working`/`idle` and append the latest accepted arrival as `terminal completed`, `terminal cancelled`, or `terminal failed`; canonical `v2_terminals` encoding remains independent and both clear together.

@@ -3,7 +3,7 @@ import { hasControlOrBidi, isPlainObject } from "./validation.js";
 export class PresenceProtocolError extends Error {}
 /** Maximum JSON payload size; the transport accounts for the trailing LF separately. */
 export const HERDR_MAX_LINE_BYTES = 16 * 1024;
-export type HerdrMethod = "pane.report_agent" | "pane.report_agent_session" | "pane.report_metadata" | "pane.clear_agent_authority" | "notification.show";
+export type HerdrMethod = "pane.list" | "pane.report_agent" | "pane.report_agent_session" | "pane.report_metadata" | "pane.clear_agent_authority" | "workspace.report_metadata" | "notification.show";
 export interface HerdrRequest { id: string; method: HerdrMethod; params: Record<string, unknown>; }
 export const LIFECYCLE_SOURCE = "herdr:pi";
 /** Companion metadata is separately owned but is rendered against managed Pi authority. */
@@ -29,9 +29,18 @@ const COMPANION_METADATA_CLEAR_PARAM_KEYS = ["pane_id", "source", "applies_to_so
 const METADATA_CLEAR_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "agent", "seq", "clear_title", "clear_display_agent", "clear_state_labels", "tokens"] as const;
 const METADATA_LEGACY_CLEAR_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "agent", "seq", "tokens"] as const;
 const AGENT_AUTHORITY_CLEAR_PARAM_KEYS = ["pane_id", "source", "seq"] as const;
+const PANE_LIST_PARAM_KEYS = ["workspace_id"] as const;
+const WORKSPACE_MAIN_SUMMARY_PARAM_KEYS = ["workspace_id", "source", "seq", "ttl_ms", "tokens"] as const;
+/** Workspace metadata uses a short lease because it is deliberately not source-clearable. */
+export const WORKSPACE_MAIN_SUMMARY_TTL_MS = 30_000;
+export const WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS = 10_000;
+/** List and write each get one fixed attempt: 10 s + 5 s + 5 s remains below the 30 s lease. */
+export const WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS = 5_000;
 const exactTokens = (tokens: Record<string, unknown>, keys: readonly string[]) => Object.keys(tokens).length === keys.length && keys.every(key => Object.hasOwn(tokens, key));
 const exactOwnedTokens = (tokens: Record<string, unknown>) => exactTokens(tokens, HERDR_METADATA_TOKEN_KEYS);
 const safeText = (v: unknown, max = 512): v is string => typeof v === "string" && v.length > 0 && Buffer.byteLength(v, "utf8") <= max && !hasControlOrBidi(v);
+/** IDs are opaque protocol capabilities and must not be whitespace-normalized. */
+const safeOpaqueId = (v: unknown, max = 256): v is string => safeText(v, max) && v === v.trim();
 const own = (v: Record<string, unknown>, allowed: readonly string[], required: readonly string[]) => Reflect.ownKeys(v).every((k) => typeof k === "string" && allowed.includes(k)) && required.every((k) => Object.hasOwn(v, k));
 /** Parses only the compact values introduced by this fixed Herdr projection. */
 const canonicalInteger = (value: unknown, minimum = 0): value is string => {
@@ -113,6 +122,46 @@ const exactMetadataTokens = (value: unknown): value is HerdrMetadataTokens => {
  return !summary.terminal || batch.records.some(record => record.outcome === summary.terminal);
 };
 const sessionRef = (p:Record<string,unknown>) => safeText(p.agent_session_id,128) && p.agent_session_path === undefined;
+/** The workspace projection is limited to the pane projection's existing safe summary grammar. */
+export const isCanonicalSummary = (value: unknown): value is string => parseSummary(value) !== undefined;
+/** Herdr 0.8.0's serialized PaneInfo status enum. */
+const PANE_AGENT_STATUSES = new Set(["idle", "working", "blocked", "done", "unknown"]);
+/** Herdr PaneInfo.agent is optional and nullable; only a present value needs validation. */
+const isOptionalPaneAgent = (pane: Record<string, unknown>): boolean => !Object.hasOwn(pane, "agent") || pane.agent === null || safeText(pane.agent, 64);
+type WorkspacePaneInfo = {
+ pane_id: string; terminal_id: string; workspace_id: string; tab_id: string;
+ focused: boolean; agent_status: "idle" | "working" | "blocked" | "done" | "unknown";
+ revision: number; agent?: string | null;
+};
+/** A scoped read is usable only when every bounded, schema-faithful PaneInfo names that workspace and a unique pane. */
+export function isExactWorkspacePaneListResult(value: unknown, workspaceId: string): value is { type: "pane_list"; panes: WorkspacePaneInfo[] } {
+ if (!safeOpaqueId(workspaceId) || !isPlainObject(value) || !own(value, ["type", "panes"], ["type", "panes"]) || value.type !== "pane_list" || !Array.isArray(value.panes) || value.panes.length > 128) return false;
+ const paneIds = new Set<string>();
+ for (const pane of value.panes) {
+  if (!isPlainObject(pane)
+   || !safeOpaqueId(pane.workspace_id) || pane.workspace_id !== workspaceId
+   || !safeOpaqueId(pane.pane_id) || !safeOpaqueId(pane.terminal_id) || !safeOpaqueId(pane.tab_id)
+   || typeof pane.focused !== "boolean" || !PANE_AGENT_STATUSES.has(pane.agent_status as string)
+   || !Number.isSafeInteger(pane.revision) || (pane.revision as number) < 0
+   || !isOptionalPaneAgent(pane) || paneIds.has(pane.pane_id)) return false;
+  paneIds.add(pane.pane_id);
+ }
+ return true;
+}
+/** Workspace metadata is a single leased, canonical summary token with no presentation or pane authority fields. */
+export function isExactWorkspaceMainSummaryParams(value: unknown): value is Record<string, unknown> & { tokens: { main_summary: string } } {
+ const p = value as Record<string, unknown>;
+ return isPlainObject(value)
+  && own(p, WORKSPACE_MAIN_SUMMARY_PARAM_KEYS, WORKSPACE_MAIN_SUMMARY_PARAM_KEYS)
+  && safeOpaqueId(p.workspace_id)
+  && p.source === COMPANION_METADATA_SOURCE
+  && Number.isSafeInteger(p.seq) && (p.seq as number) >= 0
+  && p.ttl_ms === WORKSPACE_MAIN_SUMMARY_TTL_MS
+  && isPlainObject(p.tokens) && exactTokens(p.tokens, ["main_summary"])
+  && isCanonicalSummary(p.tokens.main_summary);
+}
+/** workspace.report_metadata has no useful partial success result. */
+export const isExactWorkspaceReportMetadataResult = (value: unknown): value is { type: "ok" } => isPlainObject(value) && own(value, ["type"], ["type"]) && value.type === "ok";
 /** Validates Herdr v8's safe presentation and complete V2 token patch. */
 /** Companion owns the same fixed presentation projection without managed agent authority. */
 export function isExactCompanionMetadataParams(value: unknown): value is Record<string, unknown> & { tokens: HerdrMetadataTokens } {
@@ -203,10 +252,12 @@ function valid(request: HerdrRequest): boolean {
  const p = request.params; if (!safeText(request.id, 128) || !safeText(request.method, 64)) return false;
  const base = safeText(p.pane_id, 256) && safeText(p.source, 64);
  switch (request.method) {
+ case "pane.list": return own(p, PANE_LIST_PARAM_KEYS, PANE_LIST_PARAM_KEYS) && safeOpaqueId(p.workspace_id);
  case "pane.report_agent": return base && own(p,["pane_id","source","agent","state","message","seq","agent_session_id"],["pane_id","source","agent","state","seq"]) && p.source === LIFECYCLE_SOURCE && p.agent === "pi" && state.has(p.state as string) && Number.isSafeInteger(p.seq) && (p.seq as number) >= 0 && (p.message === undefined || p.message === null || safeText(p.message)) && sessionRef(p);
  case "pane.report_agent_session": return base && own(p,["pane_id","source","agent","seq","agent_session_id","session_start_source"],["pane_id","source","agent","seq"]) && p.source === LIFECYCLE_SOURCE && p.agent === "pi" && Number.isSafeInteger(p.seq) && (p.seq as number) >= 0 && sessionRef(p) && (p.session_start_source === undefined || safeText(p.session_start_source));
  case "pane.report_metadata": return base && (isExactMetadataIngressParams(p) || isExactCompanionMetadataParams(p) || isExactCompanionMetadataClearParams(p) || isExactMetadataClearParams(p) || isExactLegacyMetadataClearParams(p));
  case "pane.clear_agent_authority": return base && isExactAgentAuthorityClearParams(p);
+ case "workspace.report_metadata": return isExactWorkspaceMainSummaryParams(p);
  case "notification.show": return own(p,["title","body","sound"],["title","body","sound"]) && safeText(p.title,128) && safeText(p.body,512) && ["none","done","request"].includes(p.sound as string);
  }
 }
