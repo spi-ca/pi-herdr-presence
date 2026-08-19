@@ -19,6 +19,8 @@ Before standalone reports ordinary metadata, it sends two separate bounded, non-
 
 ## Companion envelopes and cleanup
 
-Companion uses `source: "herdr:pi-presence"` and `applies_to_source: "herdr:pi"`. Its ordinary and cleanup metadata envelopes contain only `pane_id`, `source`, `applies_to_source`, `seq`, and the ten-token map. Companion clears only its own ten tokens and may emit policy-gated static notifications; it never emits session/state authority, presentation, legacy cleanup, authority clear, focus/control, or arbitrary text.
+Companion uses `source: "herdr:pi-presence"` and `applies_to_source: "herdr:pi"`. Its ordinary metadata envelope contains `pane_id`, `source`, `applies_to_source`, `seq`, `title: "Pi · ${summary}"` derived only from the bounded safe `summary` token, `display_agent: "Pi"`, fixed `state_labels` (`idle: "Pi is idle"`, `working: "Pi is working"`, `blocked: "Pi needs attention"`, `unknown: "Pi state unknown"`), and the exact ten-token map. Its cleanup envelope contains the same ownership fields and sequence plus presentation-clear flags and all ten tokens `null`.
+
+Companion clears only its own presentation/token metadata and may emit policy-gated static notifications. It never claims, reports, or clears session or lifecycle authority, and never emits legacy cleanup, authority clear, focus/control, or arbitrary text.
 
 Notifications default to `errors`: only live accepted terminal failures and new `blocked`, `input_required`, or `failure` attention edges are eligible. Notifications have fixed text and are never retried.

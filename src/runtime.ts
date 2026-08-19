@@ -307,7 +307,7 @@ export class PresenceRuntime {
     this.client = client;
     try {
       // Standalone clears current/legacy ownership before restoring authority;
-      // companion clears only its separately-owned token projection.
+      // companion clears only its separately-owned presentation/token projection.
       await client.prepareSessionAuthority();
       if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
       if (mode === "standalone") await client.reportSession(current.ref, typeof (event as { reason?: unknown })?.reason === "string" ? (event as { reason: string }).reason : undefined);

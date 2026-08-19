@@ -1,8 +1,10 @@
 import { expect } from "bun:test";
-import { HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_METADATA_TOKEN_KEYS, isExactAgentAuthorityClearParams, isExactLegacyMetadataClearParams, isExactMetadataClearParams, isExactMetadataIngressParams } from "../../src/protocol.js";
+import { HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_METADATA_TOKEN_KEYS, isExactAgentAuthorityClearParams, isExactCompanionMetadataClearParams, isExactCompanionMetadataParams, isExactLegacyMetadataClearParams, isExactMetadataClearParams, isExactMetadataIngressParams } from "../../src/protocol.js";
 
 const envelopeKeys = ["pane_id", "source", "applies_to_source", "agent", "seq", "title", "display_agent", "state_labels", "tokens"];
 const clearEnvelopeKeys = ["pane_id", "source", "applies_to_source", "agent", "seq", "clear_title", "clear_display_agent", "clear_state_labels", "tokens"];
+const companionEnvelopeKeys = ["pane_id", "source", "applies_to_source", "seq", "title", "display_agent", "state_labels", "tokens"];
+const companionClearEnvelopeKeys = ["pane_id", "source", "applies_to_source", "seq", "clear_title", "clear_display_agent", "clear_state_labels", "tokens"];
 const legacyClearEnvelopeKeys = ["pane_id", "source", "applies_to_source", "agent", "seq", "tokens"];
 
 /** Reusable assertion for the reviewed upstream Herdr v8 metadata variants. */
@@ -20,6 +22,25 @@ export function expectExactMetadataIngress(params: unknown): void {
 export function expectExactMetadataClear(params: unknown): void {
   expect(isExactMetadataClearParams(params)).toBe(true);
   expect(Object.keys(params as object)).toEqual(clearEnvelopeKeys);
+  const metadata = params as { tokens: Record<string, unknown> };
+  expect(Object.keys(metadata.tokens)).toEqual([...HERDR_METADATA_TOKEN_KEYS]);
+  expect(Object.values(metadata.tokens)).toEqual(Array(HERDR_METADATA_TOKEN_KEYS.length).fill(null));
+}
+
+export function expectExactCompanionMetadataIngress(params: unknown): void {
+  expect(isExactCompanionMetadataParams(params)).toBe(true);
+  expect(Object.keys(params as object)).toEqual(companionEnvelopeKeys);
+  const metadata = params as { seq: unknown; tokens: Record<string, string | null>; title: unknown; display_agent: unknown; state_labels: unknown };
+  expect(metadata.seq).toEqual(expect.any(Number));
+  expect(metadata.title).toBe(`Pi · ${metadata.tokens.summary}`);
+  expect(metadata.display_agent).toBe("Pi");
+  expect(metadata.state_labels).toEqual({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" });
+  expect(Object.keys(metadata.tokens)).toEqual([...HERDR_METADATA_TOKEN_KEYS]);
+}
+
+export function expectExactCompanionMetadataClear(params: unknown): void {
+  expect(isExactCompanionMetadataClearParams(params)).toBe(true);
+  expect(Object.keys(params as object)).toEqual(companionClearEnvelopeKeys);
   const metadata = params as { tokens: Record<string, unknown> };
   expect(Object.keys(metadata.tokens)).toEqual([...HERDR_METADATA_TOKEN_KEYS]);
   expect(Object.values(metadata.tokens)).toEqual(Array(HERDR_METADATA_TOKEN_KEYS.length).fill(null));

@@ -24,7 +24,7 @@ function eventually(assertion: () => void, timeoutMs = 1_000): Promise<void> {
   });
 }
 
-test("the reviewed managed Herdr marker enables bounded companion token reporting", async () => {
+test("the reviewed managed Herdr marker enables bounded companion presentation reporting", async () => {
   const root = await fs.mkdtemp(join(os.tmpdir(), "herdr-managed-marker-"));
   const agentDirectory = join(root, "agent");
   const socketPath = join(root, "socket");
@@ -85,7 +85,10 @@ test("the reviewed managed Herdr marker enables bounded companion token reportin
     const companion = requests.filter((request) => request.params.source === "herdr:pi-presence");
     expect(companion.every((request) => request.method === "pane.report_metadata")).toBe(true);
     expect(companion.every((request) => request.params.applies_to_source === "herdr:pi")).toBe(true);
-    expect(companion.every((request) => !("agent" in request.params) && !("title" in request.params) && !("clear_title" in request.params))).toBe(true);
+    expect(companion.every((request) => !("agent" in request.params) && !("agent_session_id" in request.params))).toBe(true);
+    expect(companion.some((request) => request.params.title === `Pi · ${(request.params.tokens as Record<string, unknown>).summary}` && request.params.display_agent === "Pi")).toBe(true);
+    expect(companion.some((request) => request.params.clear_title === true && request.params.clear_display_agent === true && request.params.clear_state_labels === true)).toBe(true);
+    expect(requests.some((request) => ["pane.report_agent", "pane.report_agent_session", "pane.clear_agent_authority"].includes(request.method) && request.params.source === "herdr:pi-presence")).toBe(false);
   } finally {
     if (context) for (const listener of hooks.get("session_shutdown") ?? []) await listener({}, context);
     await new Promise(resolve => setTimeout(resolve, 5));

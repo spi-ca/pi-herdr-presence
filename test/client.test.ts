@@ -4,7 +4,7 @@ import { resolvePresenceConfig } from "../src/config.js";
 import type { HerdrMetadataTokens } from "../src/protocol.js";
 import { presentation } from "../src/presentation.js";
 import { BoundedSocketQueue } from "../src/transport.js";
-import { expectExactAgentAuthorityClear, expectExactLegacyMetadataClear, expectExactMetadataClear, expectExactMetadataIngress } from "./fixtures/metadata-ingress.js";
+import { expectExactAgentAuthorityClear, expectExactCompanionMetadataClear, expectExactCompanionMetadataIngress, expectExactLegacyMetadataClear, expectExactMetadataClear, expectExactMetadataIngress } from "./fixtures/metadata-ingress.js";
 
 type Request = { id: string; method: string; params: Record<string, unknown> };
 const session = { agent_session_id: "root-session" } as const;
@@ -182,7 +182,7 @@ test("metadata-disabled clients still clear stale current and legacy ownership a
   expectExactAgentAuthorityClear(fake.requests[4]!.params);
 });
 
-test("companion owns only its token projection and never sends authority calls", async () => {
+test("companion owns fixed presentation metadata without managed authority calls", async () => {
   const fake = recordingTransport();
   const presence = client(fake.transport, 100, "companion");
   await presence.prepareSessionAuthority();
@@ -192,14 +192,16 @@ test("companion owns only its token projection and never sends authority calls",
   await presence.teardown();
 
   expect(fake.requests).toHaveLength(3);
+  expectExactCompanionMetadataClear(fake.requests[0]!.params);
+  expectExactCompanionMetadataIngress(fake.requests[1]!.params);
+  expectExactCompanionMetadataClear(fake.requests[2]!.params);
   for (const request of fake.requests) {
     expect(request.method).toBe("pane.report_metadata");
     expect(request.params).toMatchObject({ source: "herdr:pi-presence", applies_to_source: "herdr:pi" });
     expect(request.params).not.toHaveProperty("agent");
-    expect(request.params).not.toHaveProperty("title");
-    expect(request.params).not.toHaveProperty("clear_title");
+    expect(request.params).not.toHaveProperty("agent_session_id");
   }
-  expect(fake.requests.some(request => request.method === "pane.clear_agent_authority")).toBe(false);
+  expect(fake.requests.some(request => request.method === "pane.report_agent" || request.method === "pane.report_agent_session" || request.method === "pane.clear_agent_authority")).toBe(false);
 });
 
 test("invalid output and serialization failures are contained without dispatch", async () => {

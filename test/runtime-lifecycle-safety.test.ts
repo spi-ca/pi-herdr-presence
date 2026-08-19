@@ -124,7 +124,7 @@ test("root and TUI gating leave no V2 consumer outside a root TUI session", asyn
   await runtime.shutdownSession((runtime as unknown as { context: object }).context);
 });
 
-test("a managed official integration selects token-only companion mode", async () => {
+test("a managed official integration selects companion presentation mode", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-managed-v2-"));
   const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   try {
