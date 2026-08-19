@@ -49,6 +49,9 @@ test("live metadata is queued before a best-effort toast behind an active agent 
     Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "absent") });
     for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) events.on(name, payload => runtime.handlePresenceEvent(name, payload));
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
+    // The final local idle projection is deliberately queued before the
+    // observer-only lease, which can defer under this one-slot transport.
+    await eventually(() => expect(requests.filter(request => request.method === "pane.report_metadata").length).toBeGreaterThanOrEqual(2));
     requests.length = 0;
     live = true;
     producer = createPresenceProducer({ source: "subagent", emit: events.emit });

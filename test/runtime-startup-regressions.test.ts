@@ -92,6 +92,116 @@ serial("a live edge during the stalled initial report gets latest metadata befor
   }
 });
 
+serial("a stalled startup workspace read cannot delay pending notifications, lifecycle replay, or shutdown", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-workspace-order-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let releaseReport!: () => void;
+  let releaseList!: () => void;
+  let reportSeen!: () => void;
+  let listSeen!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  const listGate = new Promise<void>(resolve => { releaseList = resolve; });
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const seenList = new Promise<void>(resolve => { listSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.report_agent" && requests.filter(candidate => candidate.method === "pane.report_agent").length === 1) { reportSeen(); await reportGate; }
+    if (request.method === "pane.list") { listSeen(); await listGate; }
+    return JSON.stringify({ id: request.id, result: request.method === "pane.list" ? { type: "pane_list", panes: [] } : {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const producer = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
+  const sessionContext = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession(sessionContext);
+    await seenReport;
+    expect(producer.activate()).toBe(true);
+    expect(producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } })).toBe(true);
+    // This arrives while startup output is closed and must replay before the
+    // observer-only workspace read begins.
+    runtime.handleAgentStart(sessionContext);
+    releaseReport();
+    await starting;
+    await seenList;
+
+    const notificationIndex = requests.findIndex(request => request.method === "notification.show");
+    const lifecycleIndex = requests.findIndex((request, index) => index > 0 && request.method === "pane.report_agent");
+    const workspaceListIndex = requests.findIndex(request => request.method === "pane.list");
+    expect(notificationIndex).toBeGreaterThan(-1);
+    expect(notificationIndex).toBeLessThan(workspaceListIndex);
+    expect(lifecycleIndex).toBeGreaterThan(-1);
+    expect(lifecycleIndex).toBeLessThan(workspaceListIndex);
+    expect((runtime as unknown as { active: boolean }).active).toBe(true);
+    await Promise.race([
+      runtime.shutdownSession(sessionContext),
+      pause(200).then(() => { throw new Error("shutdown waited for the stalled workspace read"); }),
+    ]);
+  } finally {
+    releaseReport?.();
+    releaseList?.();
+    producer.deactivate();
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("reload-active startup publishes running before a stalled workspace lease and still shuts down", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-reload-active-workspace-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let releaseList!: () => void;
+  let listSeen!: () => void;
+  const listGate = new Promise<void>(resolve => { releaseList = resolve; });
+  const seenList = new Promise<void>(resolve => { listSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.list") {
+      listSeen();
+      await listGate;
+      return JSON.stringify({ id: request.id, result: { type: "pane_list", panes: [] } });
+    }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, finalClearMs: 1_000 });
+  const sessionContext = { mode: "tui", isIdle: () => false, sessionManager: { getSessionId: () => "root" } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    await Promise.race([
+      runtime.startSession(sessionContext),
+      pause(200).then(() => { throw new Error("startSession waited for the workspace lease"); }),
+    ]);
+    await seenList;
+
+    const runningIndex = requests.findIndex(request => request.method === "pane.report_agent" && request.params.state === "working");
+    const workspaceListIndex = requests.findIndex(request => request.method === "pane.list");
+    expect(runningIndex).toBeGreaterThan(-1);
+    expect(runningIndex).toBeLessThan(workspaceListIndex);
+    expect((runtime as unknown as { active: boolean }).active).toBe(true);
+    await Promise.race([
+      runtime.shutdownSession(sessionContext),
+      pause(200).then(() => { throw new Error("shutdown waited for the workspace lease"); }),
+    ]);
+  } finally {
+    releaseList?.();
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 serial("startup projections reach a fixed point before terminal retention and notification release", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-fixed-point-"));
   const socket = join(directory, "socket");

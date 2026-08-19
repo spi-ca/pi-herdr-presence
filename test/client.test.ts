@@ -24,6 +24,7 @@ function recordingTransport() {
         requests.push(request);
         return JSON.stringify({ id: request.id, result: {} });
       },
+      cancel(_key: string) {},
       async close(timeoutMs?: number) { closes.push(timeoutMs ?? -1); },
     },
   };
@@ -296,6 +297,7 @@ test("teardown clears authority once after metadata cleanup and closes within it
         ? JSON.stringify({ id: request.id, error: { code: "rejected", message: "authority unavailable" } })
         : JSON.stringify({ id: request.id, result: {} });
     },
+    cancel(_key: string) {},
     async close(timeoutMs?: number) { closes.push(timeoutMs ?? -1); },
   };
 
@@ -319,6 +321,7 @@ test("teardown expiry closes promptly and never dispatches authority clear after
       requests.push((JSON.parse(line) as Request).method);
       return new Promise<string>(() => {});
     },
+    cancel(_key: string) {},
     async close(timeoutMs?: number) { closes.push(timeoutMs ?? -1); },
   };
 
@@ -352,6 +355,7 @@ test("teardown fences an active lifecycle failure so no stale retry follows clea
         return JSON.stringify({ id: request.id, result: {} });
       }, key, priority);
     },
+    cancel(_key: string) {},
     async close(timeoutMs?: number) { await queue.close(timeoutMs); },
   };
   const presence = client(transport);
