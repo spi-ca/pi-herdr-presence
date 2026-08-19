@@ -167,6 +167,8 @@ export class PresenceRuntime {
   private active = false;
   private rootSession = false;
   private inputLifecycleActive = false;
+  /** Balanced companion-only ownership of the managed Herdr blocked counter. */
+  private companionBlocked = false;
   private inputNotificationPending = false;
   private inputNotificationAttempted = false;
   /** Coalesce only simultaneous input lifecycles; distinct terminal edges stay live. */
@@ -202,8 +204,9 @@ export class PresenceRuntime {
   }
 
   async startSession(context: unknown, event?: unknown) {
-    // A replacement must fence ordinary client output synchronously, before its
-    // teardown waits in the authority lane. Cleanup remains explicitly allowed.
+    // A replacement must release the managed integration's counter and fence
+    // ordinary client output synchronously, before teardown/probing can await.
+    this.releaseCompanionBlocked();
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
     const epoch = ++this.epoch;
@@ -422,6 +425,7 @@ export class PresenceRuntime {
       // failure or block must be allowed to create a fresh attention edge.
       if (!event.attention) this.externalAttention.remove(event.source);
       this.states.set(event.source, event);
+      this.syncCompanionBlocked();
       const inputPresent = [...this.states.values()].some(isInteractionWaiting);
       const suppressed = [...this.states.values()].some(candidate => candidate.state === "error" || candidate.attention?.reason === "failure");
       // Retained activation replay is state reconstruction, never an alert.
@@ -445,6 +449,7 @@ export class PresenceRuntime {
     }
     this.states.delete(event.source);
     this.externalAttention.remove(event.source);
+    this.syncCompanionBlocked();
     const inputPresent = [...this.states.values()].some(isInteractionWaiting);
     const suppressed = [...this.states.values()].some(candidate => candidate.state === "error" || candidate.attention?.reason === "failure");
     if (!this.outputReady || deferLiveNotification) {
@@ -719,6 +724,7 @@ export class PresenceRuntime {
     // Pi emits shutdown, so this fence intentionally checks manager + epoch.
     if (!this.shutdownSessionFence(context) && !this.pendingShutdownFence(context)) return;
     // Fence and abort observer eligibility before queued lifecycle teardown.
+    this.releaseCompanionBlocked();
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
     ++this.epoch;
@@ -818,6 +824,24 @@ export class PresenceRuntime {
     }
     this.localPiActive = false;
     this.localTodoActive = false;
+  }
+
+  /** Bridge the aggregate V2 ask_user state into Herdr's managed counter only. */
+  private syncCompanionBlocked() {
+    if (this.mode !== "companion") return;
+    const active = [...this.states.values()].some(isInteractionWaiting);
+    if (active === this.companionBlocked) return;
+    this.companionBlocked = active;
+    try {
+      this.pi.events.emit("herdr:blocked", active ? { active: true, label: "Pi needs your input" } : { active: false });
+    } catch {}
+  }
+
+  /** A synchronous lifecycle fence must balance a prior best-effort acquire. */
+  private releaseCompanionBlocked() {
+    if (!this.companionBlocked) return;
+    this.companionBlocked = false;
+    try { this.pi.events.emit("herdr:blocked", { active: false }); } catch {}
   }
 
   /** One live input lifecycle yields at most one alert; retained replay only restores pane state. */
@@ -1132,6 +1156,8 @@ export class PresenceRuntime {
   }
 
   private teardownLocal() {
+    // Fallback for failed activation and every asynchronous teardown path.
+    this.releaseCompanionBlocked();
     this.clearTerminalClearTimer();
     this.workspaceLease.stop();
     this.workspaceLease.update(null);

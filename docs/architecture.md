@@ -106,9 +106,10 @@ flowchart TD
   Probe -->|absent| Standalone[Standalone]
   Probe -->|unknown| Disabled[Disabled]
   Companion --> CP[Own herdr:pi-presence presentation/tokens]
+  CP --> CB[Delegate aggregate ask_user waiting through one managed blocked lease]
   Standalone --> SP[Own herdr:pi lifecycle + presentation/tokens]
-  CP --> CT[Teardown: own current projection only]
+  CB --> CT[Replacement/shutdown: release lease, then clear own current projection]
   SP --> ST[Teardown: current clear, legacy clear, then authority clear if deadline permits]
 ```
 
-Teardown fences ordinary output first. Companion clears only its `herdr:pi-presence` presentation/tokens. Standalone clears its current projection, then its legacy token projection, and may clear `herdr:pi` authority before the bounded teardown deadline. Neither mode clears workspace metadata; the workspace lease uses expiry instead.
+Replacement and shutdown synchronously release a held companion blocked lease before fencing ordinary output and entering asynchronous teardown; local teardown repeats the release idempotently as a fallback. Companion then clears only its `herdr:pi-presence` presentation/tokens, while the managed integration remains the sole `herdr:pi` socket lifecycle reporter. Standalone fences ordinary output and clears its current projection, then its legacy token projection, and may clear `herdr:pi` authority before the bounded teardown deadline. Neither mode clears workspace metadata; the workspace lease uses expiry instead.
