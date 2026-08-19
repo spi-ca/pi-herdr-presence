@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Workspace heartbeat pacing now lives in `src/workspace-summary.ts`: each next 10-second attempt is scheduled after the prior publication completes, attempts do not overlap, and replacement/teardown fence pending or in-flight work without clearing the 30-second workspace lease.
+- CI now runs Bun coverage through `scripts/check-coverage.ts`, requiring at least 85% function and 90% line coverage. The real-Herdr V2 producer harness moved to `scripts/live-herdr-presence-producers.ts`; it remains manual, standalone-only, disposable-pane guarded, requires metadata, effective notifications disabled, and adequate terminal retention, and is excluded from automatic CI.
+- Socket/relay handling now adds per-request fingerprint rechecks, bounded one-line framing, timeout fences, and cancellation fences for active and newer queued same-key workspace requests during replacement or shutdown.
+- Dependency alignment and documentation readability updates now follow the Pi `0.84.2` peer convention (`*`) with current development types/lock guidance, and clarify bounded Todo structural validation and non-projection boundaries.
+
 - Workspace presence now requires an explicit opaque `HERDR_WORKSPACE_ID`, validates a scoped bounded, schema-faithful `pane.list`, and leases canonical `main_summary` from `herdr:pi-presence` only when this is the workspace's sole reported/detected Pi pane. Herdr `PaneInfo.agent` may be absent or `null`; only `agent: "pi"` counts. The 30-second lease attempts a refresh 10 seconds after completion, with fixed no-retry request budgets, and is never destructively cleared.
 
 - Managed-hook detection now selects fail-closed automatic modes: exact managed presence uses `herdr:pi-presence` companion coexistence, exact absence uses standalone `herdr:pi` authority, and ambiguous probes disable output. `PI_HERDR_PRESENCE_SOLE_REPORTER` remains compatible but no longer gates standalone activation.
