@@ -64,7 +64,7 @@ export function safeMessage(state: HerdrState, max: number, events: readonly Pre
   return boundedPresenceText(text, { maxBytes: 128, maxCodePoints: max });
 }
 
-/** Presentation is fixed; all varying status is represented by safe metadata tokens. */
+/** Display agent and state labels are fixed; standalone title derives from the safe summary token. */
 export function presentation(): HerdrPresentation { return HERDR_FIXED_PRESENTATION; }
 
 function addSummarySegment(parts: string[], value: string, reserve = 0) {

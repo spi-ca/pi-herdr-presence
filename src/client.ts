@@ -1,6 +1,6 @@
 import type { PresenceConfig, PresenceMode } from "./config.js";
 import type { HerdrIdentity } from "./identity.js";
-import { COMPANION_METADATA_SOURCE, decodeHerdrResponse, encodeHerdrRequest, HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_METADATA_TOKEN_KEYS, type HerdrMetadataTokens, type HerdrMethod, type HerdrPresentation } from "./protocol.js";
+import { COMPANION_METADATA_SOURCE, decodeHerdrResponse, encodeHerdrRequest, HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_METADATA_TOKEN_KEYS, titleForSummary, type HerdrMetadataTokens, type HerdrMethod, type HerdrPresentation } from "./protocol.js";
 import { HerdrSocketTransport, PresenceTransportError } from "./transport.js";
 import { processCoordinator } from "./process-coordinator.js";
 import { hasControlOrBidi } from "./validation.js";
@@ -20,7 +20,7 @@ export class PresenceClient {
   private get metadataSource(): string { return this.companion ? COMPANION_METADATA_SOURCE : LIFECYCLE_SOURCE; }
   async reportSession(sessionRef: SessionRef, reason?: string): Promise<void> { if(this.companion)return; const seq=this.next(); if(seq===undefined)return; await this.send("pane.report_agent_session", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, agent:"pi", seq, ...(safeSessionStartReason(reason) ? {session_start_source:reason}: {}), ...sessionRef }, "session"); }
   async report(state: "idle"|"working"|"blocked"|"unknown", sessionRef: SessionRef, message?: string): Promise<void> { if(this.companion)return; const seq=this.next(); if(seq===undefined)return; await this.send("pane.report_agent", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, agent:"pi", state, ...(message ? {message}: {}), seq, ...sessionRef }, "agent"); }
-  /** Herdr v8 renders only fixed, privacy-safe presentation fields plus the complete V2 token patch. */
+  /** Herdr v8 renders fixed display fields, a summary-derived title, and the complete V2 token patch. */
   async metadata(presentation: HerdrPresentation, tokens: HerdrMetadataTokens): Promise<void> {
     if(!this.config.metadata)return;
     // Await only incomplete startup work. Once its successful completion is
@@ -33,7 +33,7 @@ export class PresenceClient {
     if(seq===undefined)return;
     const params = this.companion
       ? { pane_id:this.identity.paneId, source:this.metadataSource, applies_to_source:LIFECYCLE_SOURCE, seq, tokens }
-      : { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, title:presentation.title, display_agent:presentation.displayAgent, state_labels:presentation.labels, tokens };
+      : { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, title:titleForSummary(tokens.summary), display_agent:presentation.displayAgent, state_labels:presentation.labels, tokens };
     await this.send("pane.report_metadata", params, "metadata");
   }
   /**
