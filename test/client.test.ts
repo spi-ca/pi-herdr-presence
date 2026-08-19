@@ -122,6 +122,7 @@ test("a failed legacy migration is one bounded attempt and does not block normal
         ? "invalid response"
         : JSON.stringify({ id: request.id, result: {} });
     },
+    cancel(_key: string) {},
     async close() {},
   });
 
@@ -276,12 +277,30 @@ test("lifecycle transport retries split the configured timeout across two attemp
       timeouts.push(timeoutMs!);
       return timeouts.length === 1 ? "not json" : JSON.stringify({ id: request.id, result: { type: "ok" } });
     },
+    cancel(_key: string) {},
     async close() {},
   };
 
   await client(transport, 701).report("working", session);
 
   expect(timeouts).toEqual([350, 351]);
+});
+
+test("a minimum lifecycle timeout remains one nonzero bounded attempt", async () => {
+  const timeouts: number[] = [];
+  const transport = {
+    async request(line: string, _key?: string, _priority?: boolean, timeoutMs?: number) {
+      const request = JSON.parse(line) as Request;
+      timeouts.push(timeoutMs!);
+      return JSON.stringify({ id: request.id, result: {} });
+    },
+    cancel(_key: string) {},
+    async close() {},
+  };
+
+  await client(transport, 1).report("working", session);
+
+  expect(timeouts).toEqual([1]);
 });
 
 test("teardown clears authority once after metadata cleanup and closes within its aggregate deadline", async () => {
@@ -400,6 +419,7 @@ test("a failed stale keyed agent attempt cannot retry over the latest state", as
         return JSON.stringify({ id: request.id, result: {} });
       }, key, priority);
     },
+    cancel(key: string) { queue.cancel(key); },
     async close(timeoutMs?: number) { await queue.close(timeoutMs); },
   };
   presence = client(transport);

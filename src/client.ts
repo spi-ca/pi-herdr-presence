@@ -24,6 +24,10 @@ import { hasControlOrBidi } from "./validation.js";
 export const LIFECYCLE_SOURCE = "herdr:pi";
 export const OWNED_METADATA_TOKENS = HERDR_METADATA_TOKEN_KEYS;
 export const LEGACY_METADATA_TOKENS = HERDR_LEGACY_METADATA_TOKEN_KEYS;
+const WORKSPACE_OBSERVER_KEYS = [
+	"workspace-pane-list",
+	"workspace-main-summary",
+] as const;
 /** Herdr's fixed session projection is intentionally ID-only; paths are never sent. */
 export type SessionRef = { agent_session_id: string };
 
@@ -397,8 +401,7 @@ export class PresenceClient {
 	fenceOrdinaryOutput(): void {
 		this.closing = true;
 		this.pendingWorkspaceSummary = null;
-		this.transport.cancel("workspace-pane-list");
-		this.transport.cancel("workspace-main-summary");
+		this.cancelWorkspaceObservers();
 	}
 	async close(timeoutMs?: number): Promise<void> {
 		this.fenceOrdinaryOutput();
@@ -440,6 +443,10 @@ export class PresenceClient {
 			return undefined;
 		}
 	}
+	/** Shutdown fences observer work, while ordinary output reserves preemption atomically in transport. */
+	private cancelWorkspaceObservers(): void {
+		for (const key of WORKSPACE_OBSERVER_KEYS) this.transport.cancel(key);
+	}
 	/** Lifecycle requests use two bounded attempts. */
 	private async send(
 		method: HerdrMethod,
@@ -453,6 +460,9 @@ export class PresenceClient {
 		const revision = (this.keyRevisions.get(key) ?? 0) + 1;
 		this.keyRevisions.set(key, revision);
 		const id = `${this.metadataSource}:${++this.requestNumber}`;
+		// This deadline starts before transport preemption. An unabortable observer
+		// fingerprint may delay dispatch, but can never extend lifecycle output.
+		const deadlineAt = Date.now() + this.config.timeoutMs;
 		try {
 			let line: string;
 			// Validation and serialization are output-only too: never dispatch or reject lifecycle work.
@@ -461,16 +471,22 @@ export class PresenceClient {
 			} catch {
 				return;
 			}
-			const firstTimeout = Math.floor(this.config.timeoutMs / 2);
-			const retryTimeout = this.config.timeoutMs - firstTimeout;
-			try {
-				const response = await this.transport.request(
+			const firstTimeout = Math.max(1, Math.floor(this.config.timeoutMs / 2));
+			const retryTimeout = Math.max(0, this.config.timeoutMs - firstTimeout);
+			const request = async (attemptTimeout: number): Promise<string> => {
+				const remaining = deadlineAt - Date.now();
+				if (attemptTimeout <= 0 || remaining <= 0)
+					throw new PresenceTransportError("Socket request timed out.");
+				return this.transport.request(
 					line,
 					key,
 					priority,
-					firstTimeout,
+					Math.min(attemptTimeout, remaining),
+					cleanup ? undefined : WORKSPACE_OBSERVER_KEYS,
 				);
-				decodeHerdrResponse(response, id);
+			};
+			try {
+				decodeHerdrResponse(await request(firstTimeout), id);
 			} catch (error) {
 				// Transport does not distinguish pre-dispatch failures from timeout/EOF.
 				if (
@@ -485,10 +501,7 @@ export class PresenceClient {
 				)
 					return;
 				try {
-					decodeHerdrResponse(
-						await this.transport.request(line, key, priority, retryTimeout),
-						id,
-					);
+					decodeHerdrResponse(await request(retryTimeout), id);
 				} catch {
 					/* output-only best effort */
 				}

@@ -110,7 +110,8 @@ test("companion emits a policy-eligible static notification with exact presentat
     expect(notices.map(request => request.params)).toEqual([{ title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" }]);
     const metadata = requests.filter(request => request.method === "pane.report_metadata");
     expect(metadata).not.toHaveLength(0);
-    expect(requests.some(request => request.method === "pane.list" && request.params.workspace_id === "workspace")).toBe(true);
+    // The terminal's actionable notification preempts the observer-only eligibility read.
+    expect(requests.some(request => request.method === "pane.list" && request.params.workspace_id === "workspace")).toBe(false);
     for (const request of metadata) {
       expect(request.method).toBe("pane.report_metadata");
       expect(isExactCompanionMetadataParams(request.params) || isExactCompanionMetadataClearParams(request.params)).toBe(true);
