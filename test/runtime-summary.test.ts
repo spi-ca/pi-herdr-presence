@@ -383,6 +383,7 @@ serial(
 				const expiryMetadata = metas(requests).at(-1);
 				expect(token(expiryMetadata!).v2_terminals).toBeNull();
 				expect(token(expiryMetadata!).v2_terminal_overflow).toBeNull();
+				expect(token(expiryMetadata!).summary).toBe("idle");
 				expect(
 					requests.filter((request) => request.method === "pane.report_agent"),
 				).toHaveLength(agentReportCount);
