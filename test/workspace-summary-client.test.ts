@@ -14,7 +14,7 @@ function runWith(result: unknown) {
       const request = JSON.parse(line) as Request;
       requests.push(request);
       return JSON.stringify({ id: request.id, result: request.method === "pane.list" ? result : { type: "ok" } });
-    }, async close() {} } as never,
+    }, cancel(_key: string) {}, async close() {} } as never,
     resolvePresenceConfig(),
   );
   return { client, requests };
