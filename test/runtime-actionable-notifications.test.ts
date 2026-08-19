@@ -26,6 +26,7 @@ const environmentKeys = [
 	"HERDR_ENV",
 	"HERDR_SOCKET_PATH",
 	"HERDR_PANE_ID",
+	"HERDR_WORKSPACE_ID",
 	"PI_CODING_AGENT_DIR",
 ] as const;
 const sleep = (ms = 20) =>
@@ -112,7 +113,7 @@ async function withRuntime(
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_SOCKET_PATH: socketPath,
-			HERDR_PANE_ID: "pane",
+			HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
 			PI_CODING_AGENT_DIR: join(directory, "absent"),
 		});
 		for (const name of [

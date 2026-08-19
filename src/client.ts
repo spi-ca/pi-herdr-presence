@@ -1,6 +1,6 @@
 import type { PresenceConfig, PresenceMode } from "./config.js";
 import type { HerdrIdentity } from "./identity.js";
-import { COMPANION_METADATA_SOURCE, decodeHerdrResponse, encodeHerdrRequest, HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_METADATA_TOKEN_KEYS, titleForSummary, type HerdrMetadataTokens, type HerdrMethod, type HerdrPresentation } from "./protocol.js";
+import { COMPANION_METADATA_SOURCE, decodeHerdrResponse, encodeHerdrRequest, HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_METADATA_TOKEN_KEYS, isCanonicalSummary, isExactWorkspacePaneListResult, isExactWorkspaceReportMetadataResult, titleForSummary, WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS, WORKSPACE_MAIN_SUMMARY_TTL_MS, type HerdrMetadataTokens, type HerdrMethod, type HerdrPresentation } from "./protocol.js";
 import { HerdrSocketTransport, PresenceTransportError } from "./transport.js";
 import { processCoordinator } from "./process-coordinator.js";
 import { hasControlOrBidi } from "./validation.js";
@@ -14,7 +14,7 @@ export type SessionRef = { agent_session_id: string };
 
 /** One request per connection is enforced by HerdrSocketTransport; this client never subscribes. */
 export class PresenceClient {
-  private requestNumber = 0; private closed = false; private closing = false; private teardownPromise:Promise<void>|null=null; private keyRevisions = new Map<string, number>(); private legacyMetadataClear: Promise<void> | null = null; private startupMetadataClear: Promise<void> | null = null; private sessionAuthorityPrepared = false; private normalMetadataStarted = false;
+  private requestNumber = 0; private closed = false; private closing = false; private teardownPromise:Promise<void>|null=null; private keyRevisions = new Map<string, number>(); private legacyMetadataClear: Promise<void> | null = null; private startupMetadataClear: Promise<void> | null = null; private sessionAuthorityPrepared = false; private normalMetadataStarted = false; private workspaceSummaryRequest: Promise<void> | null = null; private pendingWorkspaceSummary: string | null = null;
   constructor(private readonly identity: HerdrIdentity, private readonly transport: HerdrSocketTransport, private readonly config: PresenceConfig, private readonly mode: Exclude<PresenceMode, "disabled"> = "standalone") {}
   private get companion(): boolean { return this.mode === "companion"; }
   private get metadataSource(): string { return this.companion ? COMPANION_METADATA_SOURCE : LIFECYCLE_SOURCE; }
@@ -59,6 +59,49 @@ export class PresenceClient {
     this.legacyMetadataClear=this.send("pane.report_metadata", { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, tokens:Object.fromEntries(LEGACY_METADATA_TOKENS.map((token)=>[token,null])) }, "metadata-legacy-clear", false, false, true);
     return this.legacyMetadataClear;
   }
+  /** Publish a leased workspace summary only when this is the sole reported Pi pane in its opaque workspace. */
+  async workspaceMainSummary(summary: string): Promise<void> {
+    if (!this.config.metadata || this.closed || this.closing || !isCanonicalSummary(summary)) return;
+    this.pendingWorkspaceSummary = summary;
+    if (!this.workspaceSummaryRequest) this.workspaceSummaryRequest = this.drainWorkspaceMainSummary();
+    return this.workspaceSummaryRequest;
+  }
+  /** Clear the drain marker in-band so an arriving summary starts a new drain, never an orphaned pending value. */
+  private async drainWorkspaceMainSummary(): Promise<void> {
+    while (!this.closed && !this.closing && this.pendingWorkspaceSummary !== null) {
+      const pending = this.pendingWorkspaceSummary;
+      this.pendingWorkspaceSummary = null;
+      await this.publishWorkspaceMainSummary(pending);
+    }
+    this.workspaceSummaryRequest = null;
+  }
+  private async publishWorkspaceMainSummary(summary: string): Promise<void> {
+    const listed = await this.read("pane.list", { workspace_id: this.identity.workspaceId }, "workspace-pane-list");
+    // The list request may finish after synchronous replacement/shutdown fencing.
+    // Never let that stale eligibility snapshot dispatch a workspace write.
+    if (this.closed || this.closing || !isExactWorkspacePaneListResult(listed, this.identity.workspaceId)) return;
+    const piPanes = listed.panes.filter((pane) => pane.agent === "pi");
+    if (piPanes.length !== 1 || piPanes[0]?.pane_id !== this.identity.paneId) return;
+    const seq = this.next();
+    if (seq === undefined || this.closed || this.closing) return;
+    await this.reportWorkspaceMainSummary({
+      workspace_id: this.identity.workspaceId,
+      source: COMPANION_METADATA_SOURCE,
+      seq,
+      ttl_ms: WORKSPACE_MAIN_SUMMARY_TTL_MS,
+      tokens: { main_summary: summary },
+    });
+  }
+  /** A workspace lease write has one fixed bounded attempt and accepts only Herdr's exact acknowledgment. */
+  private async reportWorkspaceMainSummary(params: Record<string, unknown>): Promise<void> {
+    if (this.closed || this.closing) return;
+    const id = `${this.metadataSource}:${++this.requestNumber}`;
+    try {
+      const line = encodeHerdrRequest({ id, method: "workspace.report_metadata", params });
+      const result = decodeHerdrResponse(await this.transport.request(line, "workspace-main-summary", false, WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS), id);
+      if (!isExactWorkspaceReportMetadataResult(result)) return;
+    } catch { /* workspace output is observer-only */ }
+  }
   /** Explicitly clear every owned presentation field and null every fixed token. */
   async clearMetadata(): Promise<void> { await this.clearCurrentMetadata("metadata-clear"); }
   private async clearCurrentMetadata(key:string, retry=true): Promise<void> { const seq=this.next(); if(seq===undefined)return; const tokens=Object.fromEntries(OWNED_METADATA_TOKENS.map((token)=>[token,null])); const params=this.companion ? { pane_id:this.identity.paneId, source:this.metadataSource, applies_to_source:LIFECYCLE_SOURCE, seq, clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens } : { pane_id:this.identity.paneId, source:LIFECYCLE_SOURCE, applies_to_source:LIFECYCLE_SOURCE, agent:"pi", seq, clear_title:true, clear_display_agent:true, clear_state_labels:true, tokens }; await this.send("pane.report_metadata", params, key, true, retry, true); }
@@ -73,7 +116,7 @@ export class PresenceClient {
    if(this.teardownPromise)return this.teardownPromise;
    if(this.closed)return Promise.resolve();
    // Fence ordinary reports and their retries before cleanup enters the queue.
-   this.closing=true;
+   this.fenceOrdinaryOutput();
    this.teardownPromise=this.performTeardown(timeoutMs);
    return this.teardownPromise;
   }
@@ -94,11 +137,22 @@ export class PresenceClient {
     // transport mock. It is contained above, and close prevents any retry.
    }
   }
-  async close(timeoutMs?:number): Promise<void> { this.closing=true;this.closed=true; await this.transport.close(timeoutMs); }
+  /** Synchronously stop ordinary output while preserving explicitly marked teardown requests. */
+  fenceOrdinaryOutput(): void { this.closing = true; this.pendingWorkspaceSummary = null; }
+  async close(timeoutMs?:number): Promise<void> { this.fenceOrdinaryOutput(); this.closed=true; await this.transport.close(timeoutMs); }
   private next(): number | undefined {
     try {
       const sequence = processCoordinator.nextSequence();
       return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : undefined;
+    } catch { return undefined; }
+  }
+  /** Read-only workspace eligibility is one bounded attempt; malformed or remote responses are never eligible. */
+  private async read(method: Extract<HerdrMethod, "pane.list">, params: Record<string, unknown>, key: string): Promise<unknown | undefined> {
+    if (this.closed || this.closing) return undefined;
+    const id = `${this.metadataSource}:${++this.requestNumber}`;
+    try {
+      const line = encodeHerdrRequest({ id, method, params });
+      return decodeHerdrResponse(await this.transport.request(line, key, false, WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS), id);
     } catch { return undefined; }
   }
   /** Lifecycle requests use two bounded attempts. */

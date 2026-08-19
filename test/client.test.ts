@@ -31,7 +31,7 @@ function recordingTransport() {
 
 function client(transport: object, timeoutMs = 100, mode: "standalone" | "companion" = "standalone") {
   return new PresenceClient(
-    { paneId: "pane", socketPath: "/socket" },
+    { paneId: "pane", workspaceId: "workspace", socketPath: "/socket" },
     transport as never,
     { ...resolvePresenceConfig(), timeoutMs },
     mode,
@@ -163,7 +163,7 @@ test("startup current metadata clear makes one attempt after timeout or invalid 
 test("metadata-disabled clients still clear stale current and legacy ownership at startup and teardown", async () => {
   const fake = recordingTransport();
   const presence = new PresenceClient(
-    { paneId: "pane", socketPath: "/socket" },
+    { paneId: "pane", workspaceId: "workspace", socketPath: "/socket" },
     fake.transport as never,
     { ...resolvePresenceConfig(), metadata: false },
   );
@@ -207,7 +207,7 @@ test("companion owns fixed presentation metadata without managed authority calls
 test("invalid output and serialization failures are contained without dispatch", async () => {
   const fake = recordingTransport();
   const invalid = new PresenceClient(
-    { paneId: "😀".repeat(65), socketPath: "/socket" },
+    { paneId: "😀".repeat(65), workspaceId: "workspace", socketPath: "/socket" },
     fake.transport as never,
     resolvePresenceConfig(),
   );

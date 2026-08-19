@@ -18,7 +18,7 @@ type Bus = {
   events: { on(name: string, listener: Listener): void; emit(name: string, payload: unknown): void };
 };
 type InternalRuntime = {
-  client: { teardown(timeoutMs: number): Promise<void> } | null;
+  client: { fenceOrdinaryOutput(): void; teardown(timeoutMs: number): Promise<void> } | null;
   consumer: ReturnType<typeof createPresenceConsumer> | null;
   consumerReady: unknown;
   consumerActive: boolean;
@@ -44,7 +44,7 @@ type InternalRuntime = {
 };
 
 const pause = (milliseconds = 80) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const environmentKeys = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"] as const;
+const environmentKeys = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "PI_CODING_AGENT_DIR"] as const;
 
 function makeBus(): Bus {
   const listeners = new Map<string, Listener[]>();
@@ -97,7 +97,7 @@ async function withRuntime(
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: socket,
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir"),
     });
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
@@ -133,7 +133,7 @@ test("a managed official integration selects companion presentation mode", async
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: join(directory, "no-socket"),
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       PI_CODING_AGENT_DIR: directory,
     });
     const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
@@ -155,7 +155,7 @@ test("unknown managed-hook startup stays disabled", async () => {
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: "/tmp/herdr-presence-no-socket",
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       // Relative configured roots are deliberately ambiguous and fail closed.
       PI_CODING_AGENT_DIR: "ambiguous-relative-root",
     });
@@ -175,7 +175,7 @@ test("an absent managed file automatically activates standalone mode", async () 
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: socket,
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir"),
     });
     const runtime = new PresenceRuntime(makeBus() as never, resolvePresenceConfig());
@@ -424,7 +424,7 @@ test("consumer activation failure emits no socket output and releases local hand
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: join(directory, "socket"),
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir"),
     });
     const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
@@ -454,7 +454,7 @@ test("session request precedes replayed retained output and retained attention s
   const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true });
   const producer = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
     expect(producer.activate()).toBe(true);
     expect(producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "error", attention: { reason: "failure", occurrence: "new" } })).toBe(true);
@@ -490,7 +490,7 @@ test("a failed startup migration is isolated without retrying or suppressing the
   const bus = makeBus();
   const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true });
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
     await pause();
@@ -532,7 +532,7 @@ test("gated startup retains post-activation live input, paired failure, terminal
   const interaction = createPresenceProducer({ source: "interaction", emit: bus.events.emit })!;
   const subagent = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
     const starting = runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
     await seenSession;
@@ -603,7 +603,7 @@ test("lifecycle edges arriving after consumer activation but before session auth
   const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, finalClearMs: 1_000 });
   const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "root" } };
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
     const starting = runtime.startSession(context);
     await seenSession;
@@ -659,7 +659,7 @@ test("repeated detached session starts retain only the latest queued transition"
   const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     const starts = [runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "first" } })];
     await seenFirst;
     let replacementContext: { mode: string; sessionManager: { getSessionId: () => string } } | undefined;
@@ -771,7 +771,7 @@ test("stalled startup overflow fails closed while projecting final state and tea
   const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
   const producer = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
     const starting = runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
     await seenReport;
@@ -826,7 +826,7 @@ test("shutdown requires a fenced context and cleans up through a fresh valid wra
   const timeoutMs = 321;
   await withRuntime(async (runtime) => {
     const calls: number[] = [];
-    internal(runtime).client = { async teardown(timeout) { calls.push(timeout); } };
+    internal(runtime).client = { fenceOrdinaryOutput() {}, async teardown(timeout) { calls.push(timeout); } };
 
     await runtime.shutdownSession({});
     expect(internal(runtime).rootSession).toBe(true);
@@ -856,10 +856,10 @@ test("detached lifecycle hooks retain immediate agent edges while startup socket
   const server = await fakeSocket(socket, async () => await new Promise<string>(() => {}));
   const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   const bus = makeBus();
-  const runtime = new PresenceRuntime(bus as never, { ...{ ...resolvePresenceConfig(), soleReporter: true }, timeoutMs: 10, finalClearMs: 1_000 });
+  const runtime = new PresenceRuntime(bus as never, { ...{ ...resolvePresenceConfig(), soleReporter: true }, timeoutMs: 10, metadata: false, finalClearMs: 1_000 });
   const context = { mode: "tui", sessionManager: { getSessionId: () => "root" }, isIdle: () => true };
   try {
-    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
     const start = bus.hooks.get("session_start")?.[0];
     const agentStart = bus.hooks.get("agent_start")?.[0];

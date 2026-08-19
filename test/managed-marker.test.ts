@@ -30,7 +30,7 @@ test("the reviewed managed Herdr marker enables bounded companion presentation r
   const socketPath = join(root, "socket");
   const requests: Request[] = [];
   const environment = Object.fromEntries(
-    ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "PI_CODING_AGENT_DIR"].map((key) => [key, process.env[key]]),
+    ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "PI_CODING_AGENT_DIR"].map((key) => [key, process.env[key]]),
   );
   const hooks = new Map<string, Listener[]>();
   let context: { mode: string; isIdle: () => boolean; sessionManager: { getSessionId: () => string } } | undefined;
@@ -69,7 +69,7 @@ test("the reviewed managed Herdr marker enables bounded companion presentation r
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: socketPath,
-      HERDR_PANE_ID: "pane",
+      HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace",
       PI_CODING_AGENT_DIR: agentDirectory,
     });
 

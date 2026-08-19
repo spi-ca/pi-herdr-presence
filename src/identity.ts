@@ -3,17 +3,23 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { hasControlOrBidi } from "./validation.js";
 
-export interface HerdrIdentity { paneId: string; socketPath: string; }
+export interface HerdrIdentity { paneId: string; workspaceId: string; socketPath: string; }
 export interface SocketFingerprint { dev: number; ino: number; uid: number; }
 const safe = (value: string | undefined): value is string => !!value && Buffer.byteLength(value, "utf8") <= 256 && !hasControlOrBidi(value);
+/** Opaque IDs are capabilities, not display text: preserve and require canonical raw input. */
+const safeOpaqueId = (value: string | undefined): value is string => safe(value) && value === value.trim();
 
 /** Herdr itself supplies all three values; Linux/macOS Unix sockets only. */
 export function readHerdrIdentity(env: NodeJS.ProcessEnv = process.env, platform = process.platform): HerdrIdentity | null {
-  const paneId = env.HERDR_PANE_ID?.trim();
+  const paneId = env.HERDR_PANE_ID;
+  const workspaceId = env.HERDR_WORKSPACE_ID;
+  // Paths have distinct lexical validation below, so surrounding shell whitespace
+  // is normalized only for this non-opaque filesystem input.
   const socketPath = env.HERDR_SOCKET_PATH?.trim();
   if (platform !== "linux" && platform !== "darwin") return null;
-  if (env.HERDR_ENV !== "1" || !safe(paneId) || !safe(socketPath) || socketPath.includes("\0") || !path.isAbsolute(socketPath)) return null;
-  return { paneId, socketPath };
+  if (env.HERDR_ENV !== "1" || !safeOpaqueId(paneId) || !safeOpaqueId(workspaceId) || !safe(socketPath) || socketPath.includes("\0") || !path.isAbsolute(socketPath)) return null;
+  // Herdr IDs are opaque capabilities; never infer a workspace from a pane ID.
+  return { paneId, workspaceId, socketPath };
 }
 function uid(): number | null { return typeof process.getuid === "function" ? process.getuid() : null; }
 function trustedStickyTmp(name: string, entry: Stats): boolean { return (name === "/tmp" || name === "/private/tmp") && entry.uid === 0 && (entry.mode & 0o1000) !== 0; }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_MAX_LINE_BYTES, HERDR_METADATA_TOKEN_KEYS, decodeHerdrResponse, encodeHerdrRequest, isExactAgentAuthorityClearParams, isExactCompanionMetadataClearParams, isExactCompanionMetadataParams, isExactLegacyMetadataClearParams, isExactMetadataClearParams, isExactMetadataIngressParams } from "../src/protocol.js";
+import { paneInfo } from "./fixtures/pane-info.js";
+import { HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_MAX_LINE_BYTES, HERDR_METADATA_TOKEN_KEYS, WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS, WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS, WORKSPACE_MAIN_SUMMARY_TTL_MS, decodeHerdrResponse, encodeHerdrRequest, isExactAgentAuthorityClearParams, isExactCompanionMetadataClearParams, isExactCompanionMetadataParams, isExactLegacyMetadataClearParams, isExactMetadataClearParams, isExactMetadataIngressParams, isExactWorkspaceMainSummaryParams, isExactWorkspacePaneListResult, isExactWorkspaceReportMetadataResult } from "../src/protocol.js";
 const request={id:"a",method:"pane.report_agent" as const,params:{pane_id:"p",source:"herdr:pi",agent:"pi",state:"working",seq:1,agent_session_id:"s"}};
 const nullMetadataTokens = Object.fromEntries(HERDR_METADATA_TOKEN_KEYS.map(key => [key, null]));
 const metadataParams = {pane_id:"p",source:"herdr:pi",applies_to_source:"herdr:pi",agent:"pi",seq:1,title:"Pi · idle",display_agent:"Pi",state_labels:{idle:"Pi is idle",working:"Pi is working",blocked:"Pi needs attention",unknown:"Pi state unknown"},tokens:{...nullMetadataTokens,summary:"idle"}};
@@ -88,6 +89,36 @@ test("accepts only canonical compact grammars for populated metadata tokens", ()
   { ...populated.tokens, context: "1000001" },
   { ...populated.tokens, v2_terminals: null },
  ]) expect(isExactMetadataIngressParams({ ...populated, title: `Pi · ${tokens.summary}`, tokens })).toBe(false);
+});
+
+test("strictly encodes scoped workspace summary requests and bounded pane-list results", () => {
+ const list = { type: "pane_list", panes: [paneInfo()] };
+ expect(encodeHerdrRequest({ id: "list", method: "pane.list", params: { workspace_id: "workspace" } })).toContain('"workspace_id":"workspace"');
+ expect(() => encodeHerdrRequest({ id: "list", method: "pane.list", params: {} })).toThrow();
+ expect(isExactWorkspacePaneListResult(list, "workspace")).toBe(true);
+ // Herdr PaneInfo.agent is optional and nullable; only safe strings can name an agent.
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [...list.panes, paneInfo({ pane_id: "shell", agent: "shell" }), (() => { const { agent: _agent, ...none } = paneInfo({ pane_id: "none" }); return none; })(), paneInfo({ pane_id: "null", agent: null })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ workspace_id: "other" })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent: 1 }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent: "" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_status: "done" })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), focused: "yes" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent_status: "other" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), revision: -1 }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), terminal_id: "" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: Array.from({ length: 129 }, (_, index) => paneInfo({ pane_id: String(index), agent: "other" })) }, "workspace")).toBe(false);
+ expect(WORKSPACE_MAIN_SUMMARY_TTL_MS).toBe(30_000);
+ expect(WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS).toBe(10_000);
+ expect(WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS).toBe(5_000);
+ const workspace = { workspace_id: "workspace", source: "herdr:pi-presence", seq: 1, ttl_ms: WORKSPACE_MAIN_SUMMARY_TTL_MS, tokens: { main_summary: "working · 1/2" } };
+ expect(isExactWorkspaceMainSummaryParams(workspace)).toBe(true);
+ expect(isExactWorkspaceReportMetadataResult({ type: "ok" })).toBe(true);
+ expect(isExactWorkspaceReportMetadataResult({})).toBe(false);
+ expect(isExactWorkspaceReportMetadataResult({ type: "ok", extra: true })).toBe(false);
+ expect(encodeHerdrRequest({ id: "workspace", method: "workspace.report_metadata", params: workspace })).toContain('"main_summary":"working · 1/2"');
+ expect(isExactWorkspaceMainSummaryParams({ ...workspace, tokens: { main_summary: "private prompt" } })).toBe(false);
+ expect(isExactWorkspaceMainSummaryParams({ ...workspace, ttl_ms: WORKSPACE_MAIN_SUMMARY_TTL_MS + 1 })).toBe(false);
+ expect(isExactWorkspaceMainSummaryParams({ ...workspace, tokens: { main_summary: "idle", extra: "no" } })).toBe(false);
 });
 
 test("uses UTF-8 byte limits for pane and session references, and bounds NDJSON payloads",()=>{
