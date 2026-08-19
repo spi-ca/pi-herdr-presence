@@ -6,7 +6,7 @@ Standalone owns local `herdr:pi` authority. It clears its current presentation/t
 
 Companion coexists with the managed authority. It owns only its bounded ten-token metadata projection under `herdr:pi-presence`, applied to `herdr:pi`; startup and teardown clear only that projection, and policy-gated static notifications remain permitted. It never emits session/state authority, presentation, legacy cleanup, authority clear, focus/control, or arbitrary text.
 
-The title and display agent are always `Pi`. The extension does not read or project cwd, prompts, session names or paths, task/subagent arguments, output, arbitrary producer identifiers, or raw errors. It uses only fixed presentation text and bounded count/value metadata.
+Standalone title is exactly `Pi · ${summary}`, derived only from the bounded safe `summary` token; display agent and state labels remain fixed. Companion emits no title. The extension does not read or project cwd, prompts, session names or paths, task/subagent arguments, output, arbitrary producer identifiers, or raw errors. It uses only fixed display text and bounded metadata.
 
 Terminal records are retained briefly. Their canonical `v2_terminals` encoding remains independent from the transient summary: the summary follows the latest accepted arrival and adds `terminal completed`, `terminal cancelled`, or `terminal failed` only while blocked, input, and failure state do not take precedence. Both clear together.
 

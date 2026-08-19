@@ -74,7 +74,7 @@ test("client allocator is process-monotonic across replacement clients and wall-
   }
 });
 
-test("startup clears exact current and legacy chunks before fixed presentation", async () => {
+test("startup clears exact current and legacy chunks before ordinary metadata", async () => {
   const fake = recordingTransport();
   const presence = client(fake.transport);
   const populated = {

@@ -13,7 +13,7 @@ Unavailable values are `null` except `summary`, which is always a bounded safe-d
 
 ## Standalone envelopes and cleanup
 
-Standalone uses `source: "herdr:pi"`. Its ordinary metadata envelope includes `pane_id`, `source`, `applies_to_source`, `agent`, `seq`, fixed `title: "Pi"`/`display_agent: "Pi"`/state labels, and the ten-token map. No context or arbitrary text is projected.
+Standalone uses `source: "herdr:pi"`. Its ordinary metadata envelope includes `pane_id`, `source`, `applies_to_source`, `agent`, `seq`, `title: "Pi · ${summary}"` derived only from the bounded safe `summary` token, fixed `display_agent: "Pi"`/state labels, and the ten-token map. No context or arbitrary text is projected.
 
 Before standalone reports ordinary metadata, it sends two separate bounded, non-retried cleanup envelopes: a current projection clear with presentation-clear flags and all ten tokens `null`, then a legacy-token-only clear with its exact twelve old keys `null`. They remain separate because each is independently owned and bounded. Teardown repeats both and, only if time remains, may send the standalone authority clear.
 

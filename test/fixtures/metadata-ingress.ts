@@ -9,9 +9,9 @@ const legacyClearEnvelopeKeys = ["pane_id", "source", "applies_to_source", "agen
 export function expectExactMetadataIngress(params: unknown): void {
   expect(isExactMetadataIngressParams(params)).toBe(true);
   expect(Object.keys(params as object)).toEqual(envelopeKeys);
-  const metadata = params as { seq: unknown; tokens: Record<string, unknown>; title: unknown; display_agent: unknown; state_labels: unknown };
+  const metadata = params as { seq: unknown; tokens: Record<string, string | null>; title: unknown; display_agent: unknown; state_labels: unknown };
   expect(metadata.seq).toEqual(expect.any(Number));
-  expect(metadata.title).toBe("Pi");
+  expect(metadata.title).toBe(`Pi · ${metadata.tokens.summary}`);
   expect(metadata.display_agent).toBe("Pi");
   expect(metadata.state_labels).toEqual({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" });
   expect(Object.keys(metadata.tokens)).toEqual([...HERDR_METADATA_TOKEN_KEYS]);

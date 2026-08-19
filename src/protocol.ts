@@ -15,10 +15,11 @@ export const HERDR_METADATA_TOKEN_KEYS = ["summary", "v2_progress", "v2_attentio
 export const HERDR_LEGACY_METADATA_TOKEN_KEYS = ["active", "completed", "failed", "queued", "cancelled", "total", "progress", "subagents", "subagent_wait", "subagent_error", "subagent_terminal", "subagent_terminal_at"] as const;
 export type HerdrMetadataTokens = Record<(typeof HERDR_METADATA_TOKEN_KEYS)[number], string | null>;
 export type HerdrLegacyMetadataTokens = Record<(typeof HERDR_LEGACY_METADATA_TOKEN_KEYS)[number], null>;
-export type HerdrPresentation = { title: string; displayAgent: string; labels: Record<"idle" | "working" | "blocked" | "unknown", string> };
-/** The title is deliberately fixed; no runtime context reaches pane chrome. */
+export type HerdrPresentation = { displayAgent: string; labels: Record<"idle" | "working" | "blocked" | "unknown", string> };
+/** Standalone title is derived only from the validated, bounded summary token. */
+export const titleForSummary = (summary: string | null): string => `Pi · ${summary ?? ""}`;
+/** Display agent and state labels are fixed; no runtime context reaches them. */
 export const HERDR_FIXED_PRESENTATION: HerdrPresentation = Object.freeze({
- title: "Pi",
  displayAgent: "Pi",
  labels: Object.freeze({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" }),
 });
@@ -50,7 +51,7 @@ const canonicalProgress = (value: unknown): value is string => {
 const canonicalAttention = (value: unknown): value is string => typeof value === "string" && ATTENTION_REASONS.some(reason => value === `${reason}:new` || value === `${reason}:retained`);
 const canonicalInteraction = (value: unknown): value is string => typeof value === "string" && value.startsWith("ask_user:") && canonicalInteger(value.slice("ask_user:".length));
 const canonicalSubagents = (value: unknown): value is string => typeof value === "string" && value.split(",").length === 7 && value.split(",").every(part => canonicalInteger(part));
-/** Standalone pane chrome accepts only the fixed presentation emitted at runtime. */
+/** Standalone pane chrome accepts fixed display fields and a summary-derived title. */
 const exactPresentation = (value: unknown): value is Record<string, unknown> => isPlainObject(value)
  && own(value, ["idle", "working", "blocked", "unknown"], ["idle", "working", "blocked", "unknown"])
  && value.idle === HERDR_FIXED_PRESENTATION.labels.idle
@@ -147,10 +148,10 @@ export function isExactMetadataIngressParams(value: unknown): value is Record<st
   && p.agent === "pi"
   && Number.isSafeInteger(p.seq)
   && (p.seq as number) >= 0
-  && p.title === HERDR_FIXED_PRESENTATION.title
   && p.display_agent === HERDR_FIXED_PRESENTATION.displayAgent
   && exactPresentation(p.state_labels)
-  && exactMetadataTokens(p.tokens);
+  && exactMetadataTokens(p.tokens)
+  && p.title === titleForSummary(p.tokens.summary);
 }
 /** Teardown uses Herdr's explicit v8 presentation-clear flags with the same token patch. */
 export function isExactMetadataClearParams(value: unknown): value is Record<string, unknown> & { tokens: HerdrMetadataTokens } {

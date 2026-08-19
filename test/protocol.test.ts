@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { HERDR_LEGACY_METADATA_TOKEN_KEYS, HERDR_MAX_LINE_BYTES, HERDR_METADATA_TOKEN_KEYS, decodeHerdrResponse, encodeHerdrRequest, isExactAgentAuthorityClearParams, isExactCompanionMetadataClearParams, isExactCompanionMetadataParams, isExactLegacyMetadataClearParams, isExactMetadataClearParams, isExactMetadataIngressParams } from "../src/protocol.js";
 const request={id:"a",method:"pane.report_agent" as const,params:{pane_id:"p",source:"herdr:pi",agent:"pi",state:"working",seq:1,agent_session_id:"s"}};
 const nullMetadataTokens = Object.fromEntries(HERDR_METADATA_TOKEN_KEYS.map(key => [key, null]));
-const metadataParams = {pane_id:"p",source:"herdr:pi",applies_to_source:"herdr:pi",agent:"pi",seq:1,title:"Pi",display_agent:"Pi",state_labels:{idle:"Pi is idle",working:"Pi is working",blocked:"Pi needs attention",unknown:"Pi state unknown"},tokens:{...nullMetadataTokens,summary:"idle"}};
+const metadataParams = {pane_id:"p",source:"herdr:pi",applies_to_source:"herdr:pi",agent:"pi",seq:1,title:"Pi · idle",display_agent:"Pi",state_labels:{idle:"Pi is idle",working:"Pi is working",blocked:"Pi needs attention",unknown:"Pi state unknown"},tokens:{...nullMetadataTokens,summary:"idle"}};
 const metadataClearParams = {pane_id:"p",source:"herdr:pi",applies_to_source:"herdr:pi",agent:"pi",seq:1,clear_title:true,clear_display_agent:true,clear_state_labels:true,tokens:nullMetadataTokens};
 const legacyClearParams = {pane_id:"p",source:"herdr:pi",applies_to_source:"herdr:pi",agent:"pi",seq:1,tokens:Object.fromEntries(HERDR_LEGACY_METADATA_TOKEN_KEYS.map(key => [key, null]))};
 const authorityClearParams = {pane_id:"p",source:"herdr:pi",seq:1};
@@ -22,13 +22,13 @@ test("strictly encodes known Herdr methods and response envelopes",()=>{
  expect(isExactCompanionMetadataClearParams({...companionParams,tokens:nullMetadataTokens})).toBe(true);
  expect(encodeHerdrRequest({id:"m",method:"pane.report_metadata",params:metadataParams})).toContain('"v2_progress":null');
  for (const invalid of [
-  { ...metadataParams, title: "not Pi" },
+  { ...metadataParams, title: "Pi · working" },
   { ...metadataParams, display_agent: "worker-42" },
   { ...metadataParams, state_labels: { ...metadataParams.state_labels, idle: "Waiting on /private/task" } },
   { ...metadataParams, state_labels: { ...metadataParams.state_labels, working: "Subagents are working" } },
   { ...metadataParams, state_labels: { ...metadataParams.state_labels, blocked: "Pi needs your input" } },
-  { ...metadataParams, tokens: { ...nullMetadataTokens, v2_progress: "private prompt text" } },
-  { ...metadataParams, tokens: { ...nullMetadataTokens, v2_attention: "blocked:worker-secret" } },
+  { ...metadataParams, tokens: { ...metadataParams.tokens, v2_progress: "private prompt text" } },
+  { ...metadataParams, tokens: { ...metadataParams.tokens, v2_attention: "blocked:worker-secret" } },
  ]) expect(isExactMetadataIngressParams(invalid)).toBe(false);
  expect(isExactMetadataClearParams(metadataClearParams)).toBe(true);
  expect(encodeHerdrRequest({id:"clear",method:"pane.report_metadata",params:metadataClearParams})).toContain('"clear_title":true');
@@ -57,6 +57,7 @@ test("strictly encodes known Herdr methods and response envelopes",()=>{
 test("accepts only canonical compact grammars for populated metadata tokens", () => {
  const populated = {
   ...metadataParams,
+  title: "Pi · input · 3/5 · running 2 · queued 1 · input 1",
   tokens: { summary: "input · 3/5 · running 2 · queued 1 · input 1", v2_progress: "3/5", v2_attention: "blocked:new", v2_interaction: "ask_user:1", v2_subagents: "2,0,1,3,4,5,6", v2_terminals: "pi:1:1:completed", v2_terminal_overflow: "0", tokens: "12", cost: "0.25", context: "50" },
  };
  expect(isExactMetadataIngressParams(populated)).toBe(true);
@@ -78,7 +79,7 @@ test("accepts only canonical compact grammars for populated metadata tokens", ()
   { ...populated.tokens, cost: "credential=secret" },
   { ...populated.tokens, context: "1000001" },
   { ...populated.tokens, v2_terminals: null },
- ]) expect(isExactMetadataIngressParams({ ...metadataParams, tokens })).toBe(false);
+ ]) expect(isExactMetadataIngressParams({ ...populated, title: `Pi · ${tokens.summary}`, tokens })).toBe(false);
 });
 
 test("uses UTF-8 byte limits for pane and session references, and bounds NDJSON payloads",()=>{

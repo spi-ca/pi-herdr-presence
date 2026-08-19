@@ -35,4 +35,4 @@ pi = [["state_icon", "workspace", "tab"], ["agent", "$summary"]]
 
 The default `errors` policy sends fixed, policy-gated notifications only for live accepted terminal failures and new `blocked`, `input_required`, or `failure` attention edges. Activation replay and ordinary completion stay quiet. `background` and `all` also permit the local long-running timer; `disabled` or `PI_HERDR_PRESENCE_NOTIFICATIONS=false` sends none.
 
-Presentation is fixed to `Pi`. The extension does not read or project cwd, prompts, session names or paths, task/subagent arguments, output, or raw errors.
+Standalone title is exactly `Pi · ${summary}`, derived only from the bounded safe `summary` token; display agent and state labels remain fixed. Companion emits no title. The extension does not read or project cwd, prompts, session names or paths, task/subagent arguments, output, or raw errors.

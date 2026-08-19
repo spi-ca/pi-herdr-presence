@@ -199,7 +199,7 @@ try {
   }, true);
   const tokens = terminalMetadata.params.tokens as Record<string, string | null>;
   assert.deepEqual(Object.keys(tokens), ["summary", "v2_progress", "v2_attention", "v2_interaction", "v2_subagents", "v2_terminals", "v2_terminal_overflow", "tokens", "cost", "context"]);
-  assert.equal(terminalMetadata.params.title, "Pi");
+  assert.equal(terminalMetadata.params.title, `Pi · ${tokens.summary}`);
   assert.equal(terminalMetadata.params.display_agent, "Pi");
   assert.deepEqual(terminalMetadata.params.state_labels, { idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" });
   assert.equal(tokens.v2_interaction, "ask_user:1");

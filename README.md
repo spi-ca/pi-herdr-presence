@@ -20,7 +20,7 @@ Mode selection is fail-closed: an exact managed `herdr-agent-state.ts` selects *
 
 Standalone reports session, pane state, metadata, policy-gated notifications, and teardown authority cleanup as `source: "herdr:pi"`. It sends current presentation cleanup and legacy-token cleanup as separate envelopes. Companion coexists with the managed reporter using bounded token metadata under `source: "herdr:pi-presence"`, applied to `herdr:pi`, and may emit policy-gated static notifications. It never emits session/state authority, presentation, legacy cleanup, authority clear, focus/control, or arbitrary text.
 
-Presentation is always fixed: title and display agent are `Pi`. No cwd, prompt, session name/path, task or subagent argument, output, or raw error is read or projected.
+Standalone title is exactly `Pi · ${summary}`, derived only from the bounded safe `summary` token; display agent and state labels remain fixed. Companion emits no title. No cwd, prompt, session name/path, task or subagent argument, output, or raw error is read or projected.
 
 Each metadata report uses this exact ten-token map:
 
