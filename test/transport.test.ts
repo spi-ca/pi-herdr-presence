@@ -366,10 +366,58 @@ describe("transport module: queue and deadline behavior", () => {
 			return "later";
 		}, "later");
 
-		queue.cancel("workspace");
+		const barrier = queue.cancel("workspace");
+		expect(barrier).toBeDefined();
 		await expect(active).rejects.toThrow("cancelled");
+		await barrier;
 		await expect(later).resolves.toBe("later");
 		expect(started).toEqual(["workspace", "later"]);
+		await queue.close();
+	});
+
+	test("atomically reserves preempting work ahead of later observers", async () => {
+		const queue = new BoundedSocketQueue(3);
+		const started: string[] = [];
+		let startedObserver!: () => void;
+		let releaseObserver!: () => void;
+		const observerReady = new Promise<void>((resolve) => {
+			startedObserver = resolve;
+		});
+		const observer = queue.enqueue(
+			(signal) =>
+				new Promise<string>((_resolve, reject) => {
+					started.push("observer");
+					startedObserver();
+					signal.addEventListener("abort", () => {
+						// Model an unabortable fingerprint that delays actual work settlement.
+						releaseObserver = () => reject(new Error("fingerprint settled"));
+					}, { once: true });
+				}),
+			"workspace-pane-list",
+		);
+		await observerReady;
+
+		const state = queue.enqueue(
+			async () => {
+				started.push("state");
+				return "state";
+			},
+			"state",
+			false,
+			undefined,
+			["workspace-pane-list", "workspace-main-summary"],
+		);
+		const laterObserver = queue.enqueue(async () => {
+			started.push("later-observer");
+			return "later-observer";
+		}, "workspace-pane-list");
+
+		await expect(observer).rejects.toThrow("cancelled");
+		expect(started).toEqual(["observer"]);
+		releaseObserver();
+		await expect(state).resolves.toBe("state");
+		await expect(laterObserver).resolves.toBe("later-observer");
+		expect(started).toEqual(["observer", "state", "later-observer"]);
 		await queue.close();
 	});
 
@@ -596,6 +644,50 @@ describe("transport integration: fingerprint deadlines", () => {
 		await second.close(0);
 	});
 
+	test("preempted observer holds dispatch through a stalled fingerprint and later recovers its lease", async () => {
+		const path = await temporarySocketPath("preempted-fingerprint-lease");
+		await listen(path, (socket) => readRequest(socket, () => socket.end("ok\n")));
+		let release!: () => void;
+		let started!: () => void;
+		const fingerprintStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const unresolved = new Promise<SocketFingerprint>((resolve) => {
+			release = () => resolve({ dev: 1, ino: 1, uid: 1 });
+		});
+		let calls = 0;
+		const transport = new HerdrSocketTransport(path, 100, 3, () => {
+			calls += 1;
+			if (calls === 1) {
+				started();
+				return unresolved;
+			}
+			return Promise.resolve({ dev: 1, ino: 1, uid: 1 });
+		});
+
+		const observer = transport.request(
+			"observer\n",
+			"workspace-pane-list",
+		);
+		await fingerprintStarted;
+		const state = transport.request(
+			"state\n",
+			"state",
+			false,
+			100,
+			["workspace-pane-list", "workspace-main-summary"],
+		);
+
+		await expect(observer).rejects.toThrow("cancelled");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(calls).toBe(1);
+		release();
+		await expect(state).resolves.toBe("ok");
+		await expect(transport.request("later\n")).resolves.toBe("ok");
+		expect(calls).toBe(5);
+		await transport.close();
+	});
+
 	test("fences a timed-out post-connect fingerprint until it settles, then recovers", async () => {
 		const path = await temporarySocketPath("post-fingerprint-lease");
 		await listen(path, (socket) =>
@@ -615,9 +707,7 @@ describe("transport integration: fingerprint deadlines", () => {
 
 		const transport = new HerdrSocketTransport(path, 10, 2, fingerprint);
 		await expect(transport.request("request\n")).rejects.toThrow("timed out");
-		await expect(transport.request("request\n")).rejects.toThrow(
-			"already unresolved",
-		);
+		await expect(transport.request("request\n")).rejects.toThrow("timed out");
 		release();
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		await expect(transport.request("request\n")).resolves.toBe("ok");

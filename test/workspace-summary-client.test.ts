@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { PresenceClient } from "../src/client.js";
+import { BoundedSocketQueue } from "../src/transport.js";
 import { resolvePresenceConfig } from "../src/config.js";
 import { WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS, WORKSPACE_MAIN_SUMMARY_TTL_MS } from "../src/protocol.js";
 import { paneInfo } from "./fixtures/pane-info.js";
@@ -118,6 +119,102 @@ test("workspace list and write use one fixed budget without retrying when the gl
     { method: "pane.list", timeout: WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS },
     { method: "workspace.report_metadata", timeout: WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS },
   ]);
+});
+
+test("ordinary state and notification output preempt a stalled workspace observer and later lease recovers", async () => {
+  const queue = new BoundedSocketQueue(4);
+  const requests: Request[] = [];
+  let observerStarted!: () => void;
+  const observerReady = new Promise<void>(resolve => { observerStarted = resolve; });
+  let firstList = true;
+  const transport = {
+    request(line: string, key?: string, priority = false, _timeout?: number, preemptKeys?: readonly string[]) {
+      const request = JSON.parse(line) as Request;
+      return queue.enqueue((signal) => {
+        requests.push(request);
+        if (request.method === "pane.list" && firstList) {
+          firstList = false;
+          observerStarted();
+          return new Promise<string>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("observer aborted")), { once: true });
+          });
+        }
+        return Promise.resolve(JSON.stringify({
+          id: request.id,
+          result: request.method === "pane.list" ? sole : { type: "ok" },
+        }));
+      }, key, priority, undefined, preemptKeys);
+    },
+    cancel(key: string) { return queue.cancel(key); },
+    async close() { await queue.close(); },
+  };
+  const client = new PresenceClient(
+    { paneId: "this-pane", workspaceId: "workspace", socketPath: "/socket" },
+    transport as never,
+    resolvePresenceConfig(),
+  );
+
+  const observer = client.workspaceMainSummary("idle");
+  await observerReady;
+  await Promise.all([
+    observer,
+    client.report("working", { agent_session_id: "session" }),
+    client.notify("Pi needs attention", "A Pi task needs attention", true),
+  ]);
+
+  expect(requests.map(request => request.method)).toEqual([
+    "pane.list", "pane.report_agent", "notification.show",
+  ]);
+
+  await client.workspaceMainSummary("working");
+  expect(requests.map(request => request.method)).toEqual([
+    "pane.list", "pane.report_agent", "notification.show",
+    "pane.list", "workspace.report_metadata",
+  ]);
+  await queue.close();
+});
+
+test("ordinary output deadline includes stalled observer preemption", async () => {
+  const queue = new BoundedSocketQueue(4);
+  const requests: Request[] = [];
+  let observerStarted!: () => void;
+  let releaseObserver!: () => void;
+  const observerReady = new Promise<void>(resolve => { observerStarted = resolve; });
+  const transport = {
+    request(line: string, key?: string, priority = false, timeoutMs = 0, preemptKeys?: readonly string[]) {
+      const request = JSON.parse(line) as Request;
+      return queue.enqueue((signal) => {
+        requests.push(request);
+        if (request.method === "pane.list") {
+          observerStarted();
+          return new Promise<string>((_resolve, reject) => {
+            signal.addEventListener("abort", () => { releaseObserver = () => reject(new Error("fingerprint settled")); }, { once: true });
+          });
+        }
+        return Promise.resolve(JSON.stringify({ id: request.id, result: {} }));
+      }, key, priority, Date.now() + timeoutMs, preemptKeys);
+    },
+    cancel(key: string) { return queue.cancel(key); },
+    async close(timeoutMs?: number) { await queue.close(timeoutMs); },
+  };
+  const client = new PresenceClient(
+    { paneId: "this-pane", workspaceId: "workspace", socketPath: "/socket" },
+    transport as never,
+    { ...resolvePresenceConfig(), timeoutMs: 20 },
+  );
+
+  const observer = client.workspaceMainSummary("idle");
+  await observerReady;
+  const completed = await Promise.race([
+    client.report("working", { agent_session_id: "session" }).then(() => "completed"),
+    new Promise<string>(resolve => setTimeout(() => resolve("timed out"), 100)),
+  ]);
+
+  expect(completed).toBe("completed");
+  expect(requests.map(request => request.method)).toEqual(["pane.list"]);
+  await observer;
+  releaseObserver();
+  await queue.close(20);
 });
 
 test("workspace timeout failures get no retry", async () => {

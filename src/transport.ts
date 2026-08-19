@@ -45,7 +45,16 @@ async function exchange(
 		let writeDispatched = false;
 		let socket: net.Socket | undefined;
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let fingerprinting = 0;
+		let deferred: { error?: Error; value?: string } | undefined;
 
+		const settle = (error?: Error, value?: string) => {
+			if (error) reject(error);
+			else resolve(value ?? "");
+		};
+		// Filesystem validation cannot be aborted. Mark the exchange finished at its
+		// deadline, but keep its queue work unresolved until the fingerprint lease
+		// is released so the next request cannot race into that global lease.
 		const finish = (error?: Error, value?: string) => {
 			if (done) return;
 
@@ -53,12 +62,27 @@ async function exchange(
 			if (timer) clearTimeout(timer);
 			signal?.removeEventListener("abort", abort);
 			socket?.destroy();
-
-			if (error) reject(error);
-			else resolve(value ?? "");
+			if (fingerprinting > 0) {
+				deferred = { error, value };
+				return;
+			}
+			settle(error, value);
 		};
 		const abort = () =>
 			finish(new PresenceTransportError("Socket request aborted."));
+		const fingerprintStage = async (): Promise<SocketFingerprint> => {
+			fingerprinting += 1;
+			try {
+				return await beginFingerprint(endpoint, fingerprint);
+			} finally {
+				fingerprinting -= 1;
+				if (fingerprinting === 0 && deferred) {
+					const outcome = deferred;
+					deferred = undefined;
+					settle(outcome.error, outcome.value);
+				}
+			}
+		};
 
 		// Start before the pre-connect fingerprint: the timeout fences every stage,
 		// and a late fingerprint result cannot create a connection after expiry.
@@ -71,15 +95,13 @@ async function exchange(
 
 		void (async () => {
 			try {
-				const before = await beginFingerprint(endpoint, fingerprint);
+				const before = await fingerprintStage();
 				if (done || signal?.aborted) return abort();
 
 				socket = net.createConnection({ path: endpoint });
 				socket.setEncoding("utf8");
 				socket.once("error", (error) =>
-					finish(
-						new PresenceTransportError(`Socket failure: ${error.message}`),
-					),
+					finish(new PresenceTransportError(`Socket failure: ${error.message}`)),
 				);
 				socket.once("end", () =>
 					finish(
@@ -130,7 +152,7 @@ async function exchange(
 					try {
 						if (done || signal?.aborted) return abort();
 
-						const after = await beginFingerprint(endpoint, fingerprint);
+						const after = await fingerprintStage();
 						if (done || signal?.aborted) return abort();
 						if (
 							before.dev !== after.dev ||
@@ -183,7 +205,12 @@ interface Pending {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
-type Active = { control: AbortController; item: Pending };
+type Active = {
+	control: AbortController;
+	item: Pending;
+	settled: Promise<void>;
+	release: () => void;
+};
 
 /** A bounded latest-write-wins queue with optional end-to-end deadlines. Superseded callers settle immediately. */
 export class BoundedSocketQueue {
@@ -244,26 +271,29 @@ export class BoundedSocketQueue {
 		this.reject(item, new PresenceTransportError("Socket request timed out."));
 	}
 
-	/** Abort a best-effort keyed request so lifecycle cleanup never waits for it. */
-	cancel(key: string) {
+	/** Abort a keyed request and expose only active actual-work settlement as a dispatch barrier. */
+	cancel(key: string): Promise<void> | undefined {
 		const active = this.active;
+		let settled: Promise<void> | undefined;
 		if (active?.item.key === key) {
 			active.control.abort();
 			this.reject(
 				active.item,
 				new PresenceTransportError("Socket request cancelled."),
 			);
+			settled = active.settled;
 		}
 
 		// A newer same-key item can be queued behind an in-flight request because
 		// active work is no longer in `keyed`. Cancellation fences both versions.
 		const item = this.keyed.get(key);
-		if (!item || item === active?.item) return;
+		if (!item || item === active?.item) return settled;
 
 		const index = this.queue.indexOf(item);
 		if (index >= 0) this.queue.splice(index, 1);
 		if (this.keyed.get(key) === item) this.keyed.delete(key);
 		this.reject(item, new PresenceTransportError("Socket request cancelled."));
+		return settled;
 	}
 
 	enqueue(
@@ -271,9 +301,16 @@ export class BoundedSocketQueue {
 		key?: string,
 		priority = false,
 		deadlineAt?: number,
+		preemptKeys?: readonly string[],
 	): Promise<string> {
 		if (this.closed)
 			return this.failed(new PresenceTransportError("Socket queue is closed."));
+
+		// Reserve ordinary work synchronously with observer cancellation. The
+		// cancelled active exchange remains the physical queue owner until any
+		// unabortable fingerprint has settled, while this item is already ahead of
+		// observers that arrive after the preemption.
+		for (const preemptKey of preemptKeys ?? []) this.cancel(preemptKey);
 
 		const prior = key ? this.keyed.get(key) : undefined;
 		if (prior) {
@@ -353,13 +390,22 @@ export class BoundedSocketQueue {
 				continue;
 			}
 
-			const active = { control: new AbortController(), item };
+			let release!: () => void;
+			const active = {
+				control: new AbortController(),
+				item,
+				settled: new Promise<void>((resolve) => {
+					release = resolve;
+				}),
+				release,
+			};
 			this.active = active;
 			try {
 				this.resolve(item, await item.work(active.control.signal));
 			} catch (error) {
 				this.reject(item, error);
 			} finally {
+				active.release();
 				if (this.active === active) this.active = null;
 			}
 		}
@@ -423,6 +469,7 @@ export class HerdrSocketTransport {
 		key?: string,
 		priority = false,
 		timeoutMs = this.timeoutMs,
+		preemptKeys?: readonly string[],
 	) {
 		const deadlineAt = Date.now() + timeoutMs;
 		return this.queue.enqueue(
@@ -437,11 +484,12 @@ export class HerdrSocketTransport {
 			key,
 			priority,
 			deadlineAt,
+			preemptKeys,
 		);
 	}
 
-	cancel(key: string) {
-		this.queue.cancel(key);
+	cancel(key: string): Promise<void> | undefined {
+		return this.queue.cancel(key);
 	}
 
 	close(timeoutMs = this.timeoutMs) {
