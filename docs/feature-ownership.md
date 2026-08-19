@@ -10,7 +10,7 @@ The managed-marker probe selects **companion** only for exact managed presence, 
 | --- | --- | --- |
 | Source for owned metadata | `herdr:pi` | `herdr:pi-presence`, applied to `herdr:pi` |
 | Fixed presentation and ten-token pane metadata | Owns | Owns separately |
-| Session and lifecycle/state reports | Owns `herdr:pi` | Never emits |
+| Session and lifecycle/state reports | Owns `herdr:pi` | Never sends directly; delegates accepted `ask_user` blocked transitions to the managed owner |
 | Current metadata/presentation cleanup | Owns | Owns only its separate projection |
 | Legacy token cleanup | Owns | Never emits |
 | Authority clear | May emit before teardown deadline | Never emits |
@@ -33,6 +33,6 @@ The pane title is derived only from the bounded canonical `summary`; `display_ag
 
 ## Event and lifecycle boundary
 
-The extension subscribes as a consumer of the shared V2 bus before it activates local Pi and Todo producers. Retained V2 activation replay reconstructs state but never creates notifications. Live accepted terminal failures and new attention edges are evaluated after the initial projection according to the configured policy.
+The extension subscribes as a consumer of the shared V2 bus before it activates local Pi and Todo producers. Retained V2 activation replay reconstructs state but never creates notifications. In companion mode, aggregate accepted `ask_user` waiting transitions acquire and release exactly one in-process `herdr:blocked` counter lease; the managed `herdr:pi` integration remains the sole socket lifecycle reporter. Live accepted terminal failures and new attention edges are evaluated after the initial projection according to the configured policy.
 
 The extension does not import or control `pi-subagent`. Producer ownership, lifecycle, and terminal encoding are defined by the pinned shared V2 contract; see [shared producer integration](pi-subagent-integration.md).

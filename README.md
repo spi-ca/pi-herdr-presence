@@ -17,7 +17,7 @@ Use an absolute checkout path for local development and run `/reload` after chan
 The extension starts only for a valid Herdr TUI identity (`HERDR_ENV=1`, absolute `HERDR_SOCKET_PATH`, opaque `HERDR_WORKSPACE_ID`, and opaque `HERDR_PANE_ID`) and an active managed-marker result. It uses one validated Unix-socket connection per request; all observer failures are output-only.
 
 - **Standalone** (exact managed-marker absence) owns `herdr:pi` session/lifecycle authority and its fixed pane presentation/tokens.
-- **Companion** (exact managed-marker presence) owns only `herdr:pi-presence` presentation/tokens applied to `herdr:pi`; it never owns session/lifecycle authority.
+- **Companion** (exact managed-marker presence) owns only `herdr:pi-presence` presentation/tokens applied to `herdr:pi`; it delegates aggregate accepted `ask_user` waiting state through one balanced in-process `herdr:blocked` lease while the managed integration retains sole session/lifecycle authority.
 - **Disabled** is fail-closed for an ambiguous marker or restrictive configuration.
 
 Pane metadata has exactly ten bounded tokens, including `summary`; the title is `Pi · ${summary}` and display text is fixed. An eligible runtime may lease the same bounded summary as workspace `main_summary` with a 30-second TTL. Workspace updates are eventual at the next completion-relative heartbeat, not synchronous with every pane update, and workspace metadata is never cleared—leases expire.
