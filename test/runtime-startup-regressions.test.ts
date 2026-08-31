@@ -92,6 +92,79 @@ serial("a live edge during the stalled initial report gets latest metadata befor
   }
 });
 
+serial("a pending native prompt is adopted after delayed TUI startup with one fixed notification", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-native-prompt-startup-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  const server = await fakeSocket(socket, line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const sessionContext = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession(sessionContext);
+    // startSession records an exact TUI identity before its asynchronous probe.
+    runtime.handleUiPromptStart(sessionContext);
+    expect((runtime as unknown as { pendingLifecycle: { nativePromptWaiting: boolean } | null }).pendingLifecycle?.nativePromptWaiting).toBe(true);
+    await starting;
+    await pause();
+    expect(requests.some(request => request.method === "pane.report_agent" && request.params.state === "blocked" && request.params.message === "Pi needs your input")).toBe(true);
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
+      expect.objectContaining({ title: "Pi needs your input", body: "Pi needs your input" }),
+    ]);
+  } finally {
+    await runtime.shutdownSession(sessionContext);
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("pending native prompts are discarded on replacement and shutdown", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-native-prompt-fence-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  const server = await fakeSocket(socket, line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const first = { mode: "tui", sessionManager: { getSessionId: () => "first" } };
+  const replacement = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const firstStart = runtime.startSession(first);
+    runtime.handleUiPromptStart(first);
+    const replacementStart = runtime.startSession(replacement);
+    await Promise.all([firstStart, replacementStart]);
+    expect(requests.some(request => request.method === "pane.report_agent" && request.params.state === "idle")).toBe(true);
+    expect(requests.some(request => request.method === "pane.report_agent" && request.params.state === "blocked")).toBe(false);
+    expect(requests.some(request => request.method === "notification.show")).toBe(false);
+
+    const shutdownStart = runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "shutdown" } });
+    const shutdownContext = { mode: "tui", sessionManager: (runtime as unknown as { pendingLifecycle: { manager: { getSessionId(): string } } | null }).pendingLifecycle?.manager };
+    runtime.handleUiPromptStart(shutdownContext);
+    await runtime.shutdownSession(shutdownContext);
+    await shutdownStart;
+    expect(requests.some(request => request.method === "notification.show")).toBe(false);
+  } finally {
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 serial("a stalled startup workspace read cannot delay pending notifications, lifecycle replay, or shutdown", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-workspace-order-"));
   const socket = join(directory, "socket");

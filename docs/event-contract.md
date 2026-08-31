@@ -2,7 +2,7 @@
 
 This is the authoritative Herdr wire-projection contract. [Architecture](architecture.md) describes ordering; [configuration](configuration.md) defines activation and lease eligibility; [feature ownership](feature-ownership.md) defines the authority boundary.
 
-The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json).
+The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/fixtures/normative.json).
 
 ## Pane projection
 
@@ -24,7 +24,11 @@ The summary retains `working` or `idle` and may append the latest accepted termi
 | Standalone | `source: "herdr:pi"`, `applies_to_source: "herdr:pi"`, `agent: "pi"` | Current presentation + ten tokens, then separate 12-key legacy token cleanup | Reports and may clear `herdr:pi` session/state authority |
 | Companion | `source: "herdr:pi-presence"`, `applies_to_source: "herdr:pi"` | Its current presentation + ten tokens only | Never reports or clears lifecycle/session authority directly |
 
-Companion mode bridges aggregate accepted V2 `ask_user` waiting state to the managed integration through balanced in-process `herdr:blocked` events. It emits one fixed-label acquire on the absent-to-present transition and one release on the present-to-absent transition, replacement, or shutdown. The managed `herdr:pi` integration alone converts that lease into socket lifecycle reports; no question, option, or answer content is included.
+Companion mode bridges aggregate native TUI prompt-or-accepted V2 `ask_user` waiting state to the managed integration through balanced in-process `herdr:blocked` events. It emits one fixed-label acquire on the absent-to-present transition and one release on the present-to-absent transition, replacement, or shutdown. The managed `herdr:pi` integration alone converts that lease into socket lifecycle reports; no question, option, or answer content is included.
+
+## 네이티브 입력 집계
+
+네이티브 `ui_prompt_start`는 프롬프트 본문·선택지·응답을 보관하거나 전송하지 않는다. 비동기 시작 중에는 세션 ID와 epoch에 묶인 불리언 대기 상태만 보관하고, 정확히 같은 TUI 세션이 활성화될 때만 채택한다. 교체·종료·비-TUI 또는 오래된 이벤트는 폐기한다. 네이티브 프롬프트와 수락된 V2 `ask_user`는 도착 순서와 관계없이 하나의 입력 수명주기로 집계된다. 알림 정책이 허용하면 이 수명주기는 고정된 `Pi needs your input` 제목과 본문으로 알림을 정확히 한 번만 낸다.
 
 Both ordinary envelopes include `pane_id`, a process-coordinated `seq`, title, fixed display fields, and the exact ten-token map. Standalone startup sends the current metadata clear and separate legacy-token clear before session/state authority and ordinary metadata. Companion sends only its own current metadata clear before its ordinary metadata.
 

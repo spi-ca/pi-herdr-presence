@@ -33,6 +33,8 @@ The pane title is derived only from the bounded canonical `summary`; `display_ag
 
 ## Event and lifecycle boundary
 
-The extension subscribes as a consumer of the shared V2 bus before it activates local Pi and Todo producers. Retained V2 activation replay reconstructs state but never creates notifications. In companion mode, aggregate accepted `ask_user` waiting transitions acquire and release exactly one in-process `herdr:blocked` counter lease; the managed `herdr:pi` integration remains the sole socket lifecycle reporter. Live accepted terminal failures and new attention edges are evaluated after the initial projection according to the configured policy.
+The extension subscribes as a consumer of the shared V2 bus before it activates local Pi and Todo producers. Retained V2 activation replay reconstructs state but never creates notifications. In companion mode, aggregate native TUI prompt-or-accepted V2 `ask_user` waiting transitions acquire and release exactly one in-process `herdr:blocked` counter lease; the managed `herdr:pi` integration remains the sole socket lifecycle reporter. Live accepted terminal failures and new attention edges are evaluated after the initial projection according to the configured policy.
+
+네이티브 프롬프트 시작은 임의 UI 데이터를 소비하지 않고, 일치하는 TUI 세션 ID와 epoch으로 펜스된 불리언 대기 상태만 남긴다. 비동기 시작 중의 상태는 그 정확한 세션이 활성화될 때만 채택되며, 세션 교체·종료·비-TUI·오래된 콜백에는 누출되지 않는다. 네이티브와 V2 `ask_user` 대기는 하나의 집계된 입력 경계이므로 어느 쪽이 먼저 도착해도 정책상 허용된 고정 `Pi needs your input` 알림은 한 번뿐이다.
 
 The extension does not import or control `pi-subagent`. Producer ownership, lifecycle, and terminal encoding are defined by the pinned shared V2 contract; see [shared producer integration](pi-subagent-integration.md).
