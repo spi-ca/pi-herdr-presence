@@ -81,6 +81,7 @@ async function withRuntime(
   run: (runtime: PresenceRuntime, bus: Bus, requests: Array<{ method: string; params: Record<string, unknown> }>) => Promise<void>,
   config = { ...resolvePresenceConfig(), soleReporter: true },
   bus = makeBus(),
+  setup?: (directory: string) => Promise<void>,
 ) {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-lifecycle-v2-"));
   const socket = join(directory, "socket");
@@ -94,6 +95,7 @@ async function withRuntime(
   const runtime = new PresenceRuntime(bus as never, { ...config, finalClearMs: 0 });
   registerPresenceHooks(bus as never, runtime);
   try {
+    await setup?.(directory);
     Object.assign(process.env, {
       HERDR_ENV: "1",
       HERDR_SOCKET_PATH: socket,
@@ -114,14 +116,119 @@ const internal = (runtime: PresenceRuntime) => runtime as unknown as InternalRun
 const activeContext = (runtime: PresenceRuntime) => ({ sessionManager: internal(runtime).sessionManager ?? undefined });
 const agentRequests = (requests: Array<{ method: string; params: Record<string, unknown> }>) => requests.filter((request) => request.method === "pane.report_agent");
 
-test("root and TUI gating leave no V2 consumer outside a root TUI session", async () => {
+test("root and TUI gating leave no V2 consumer or native prompt state outside a root TUI session", async () => {
   const runtime = new PresenceRuntime(makeBus() as never, { ...resolvePresenceConfig(), soleReporter: true });
 
-  await runtime.startSession({ mode: "cli", sessionManager: { getSessionId: () => "root" } });
+  const cli = { mode: "cli", sessionManager: { getSessionId: () => "root" } };
+  await runtime.startSession(cli);
+  runtime.handleUiPromptStart(cli);
   expect(internal(runtime).consumer).toBeNull();
+  expect((runtime as unknown as { nativePromptEpoch: number | null }).nativePromptEpoch).toBeNull();
   await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "" } });
   expect(internal(runtime).consumer).toBeNull();
   await runtime.shutdownSession((runtime as unknown as { context: object }).context);
+});
+
+test("native-only prompts project fixed working-to-blocked-to-working-to-idle state and notify once", async () => {
+  await withRuntime(async (runtime, bus, requests) => {
+    const context = activeContext(runtime);
+    const reports = () => agentRequests(requests).map(request => request.params);
+
+    runtime.handleUiPromptStart({ mode: "cli", sessionManager: context.sessionManager });
+    expect((runtime as unknown as { nativePromptEpoch: number | null }).nativePromptEpoch).toBeNull();
+    runtime.handleAgentStart(context);
+    await pause();
+    expect(reports().at(-1)).toMatchObject({ state: "working", message: "Pi is working" });
+    bus.hooks.get("ui_prompt_start")?.[0]?.({ title: "private prompt", content: "secret answer" }, context);
+    await pause();
+    expect(reports().at(-1)).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+    expect(JSON.stringify(requests)).not.toContain("private prompt");
+    expect(JSON.stringify(requests)).not.toContain("secret answer");
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
+      expect.objectContaining({ title: "Pi needs your input", body: "Pi needs your input" }),
+    ]);
+
+    bus.hooks.get("ui_prompt_end")?.[0]?.({ title: "private prompt" }, context);
+    await pause();
+    expect(reports().at(-1)).toMatchObject({ state: "working", message: "Pi is working" });
+
+    runtime.handleAgentSettled(context);
+    await pause();
+    expect(reports().at(-1)).toMatchObject({ state: "idle", message: "Pi is idle" });
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi needs your input")).toHaveLength(1);
+  }, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all" });
+});
+
+test("native then V2 input overlap remains blocked until both sources end and notifies once", async () => {
+  await withRuntime(async (runtime, bus, requests) => {
+    const context = activeContext(runtime);
+    const interaction = createPresenceProducer({ source: "interaction", emit: bus.events.emit })!;
+    expect(interaction.activate()).toBe(true);
+    try {
+      runtime.handleUiPromptStart(context);
+      expect(interaction.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } })).toBe(true);
+      await pause();
+      runtime.handleUiPromptEnd(context);
+      await pause();
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+      expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
+
+      expect(interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" })).toBe(true);
+      await pause();
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "idle", message: "Pi is idle" });
+    } finally {
+      interaction.deactivate();
+    }
+  }, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all" });
+});
+
+test("V2 then native input overlap notifies once and remains blocked until both sources end", async () => {
+  await withRuntime(async (runtime, bus, requests) => {
+    const context = activeContext(runtime);
+    const interaction = createPresenceProducer({ source: "interaction", emit: bus.events.emit })!;
+    expect(interaction.activate()).toBe(true);
+    try {
+      expect(interaction.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } })).toBe(true);
+      await pause();
+      runtime.handleUiPromptStart(context);
+      await pause();
+      expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+
+      expect(interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" })).toBe(true);
+      await pause();
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+      runtime.handleUiPromptEnd(context);
+      await pause();
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "idle", message: "Pi is idle" });
+    } finally {
+      interaction.deactivate();
+    }
+  }, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all" });
+});
+
+test("companion balances native prompt leases across replacement and shutdown", async () => {
+  const bus = makeBus();
+  const blocked: Array<{ active: boolean; label?: string }> = [];
+  bus.events.on("herdr:blocked", payload => blocked.push(payload as { active: boolean; label?: string }));
+  await withRuntime(async (runtime) => {
+    const first = activeContext(runtime);
+    runtime.handleUiPromptStart(first);
+    expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }]);
+
+    const replacement = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
+    await runtime.startSession(replacement);
+    expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }, { active: false }]);
+
+    runtime.handleUiPromptStart({ sessionManager: replacement.sessionManager });
+    expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }, { active: false }, { active: true, label: "Pi needs your input" }]);
+    await runtime.shutdownSession({ sessionManager: replacement.sessionManager });
+    expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }, { active: false }, { active: true, label: "Pi needs your input" }, { active: false }]);
+  }, { ...resolvePresenceConfig(), soleReporter: true, mode: "companion" }, bus, async (directory) => {
+    const agentDirectory = join(directory, "missing-agent-dir", "extensions");
+    await fs.mkdir(agentDirectory, { recursive: true });
+    await fs.writeFile(join(agentDirectory, "herdr-agent-state.ts"), "HERDR_INTEGRATION_ID=pi");
+  });
 });
 
 test("a managed official integration selects companion presentation mode", async () => {

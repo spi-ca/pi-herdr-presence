@@ -45,7 +45,7 @@ type PendingLifecycleEdge =
   | { kind: "agent_settled" }
   | { kind: "message_end"; usage: DerivedUsage }
   | { kind: "tool_result"; failed: boolean; todo?: DerivedTodo };
-type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean };
+type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean; nativePromptWaiting: boolean };
 type PendingNotificationCandidate =
   | { kind: "state"; event: PresenceStateV2; inputPresent: boolean; suppressed: boolean; acceptedAt: number }
   | { kind: "terminal"; event: PresenceTerminalV2; acceptedAt: number }
@@ -65,6 +65,13 @@ function session(context: unknown): RuntimeSession | null {
     if (typeof id !== "string" || id.length === 0 || Buffer.byteLength(id, "utf8") > 128 || hasControlOrBidi(id)) return null;
     return { id, ref: { agent_session_id: id }, manager };
   } catch { return null; }
+}
+/** Callback wrappers may omit mode, but an explicit non-TUI mode is never eligible for native UI state. */
+function isTuiCallback(context: unknown): boolean {
+  try {
+    const mode = (context as { mode?: unknown } | undefined)?.mode;
+    return mode === undefined || mode === "tui";
+  } catch { return false; }
 }
 function derivedNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(MAX_DERIVED_USAGE, value) : undefined; }
 function deriveUsage(event: unknown): DerivedUsage | undefined {
@@ -166,6 +173,8 @@ export class PresenceRuntime {
   private terminalEventId = 0;
   private active = false;
   private rootSession = false;
+  /** Native TUI prompt lifecycle, fenced to the owning root-session epoch. */
+  private nativePromptEpoch: number | null = null;
   private inputLifecycleActive = false;
   /** Balanced companion-only ownership of the managed Herdr blocked counter. */
   private companionBlocked = false;
@@ -207,6 +216,7 @@ export class PresenceRuntime {
     // A replacement must release the managed integration's counter and fence
     // ordinary client output synchronously, before teardown/probing can await.
     this.releaseCompanionBlocked();
+    this.nativePromptEpoch = null;
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
     const epoch = ++this.epoch;
@@ -218,7 +228,7 @@ export class PresenceRuntime {
     this.ingressEpoch = null;
     const current = session(context);
     this.pendingLifecycle = (context as { mode?: unknown })?.mode === "tui" && current
-      ? { epoch, id: current.id, manager: current.manager, context: context as ContextUsageProvider, edges: [], overflow: false }
+      ? { epoch, id: current.id, manager: current.manager, context: context as ContextUsageProvider, edges: [], overflow: false, nativePromptWaiting: false }
       : null;
     return this.queueStartup(() => this.beginSession(context, event, epoch, current));
   }
@@ -293,6 +303,14 @@ export class PresenceRuntime {
     this.rootSession = true;
     this.active = false;
     this.inputLifecycleActive = false;
+    // A native prompt can arrive while the asynchronous ownership probe is
+    // pending. Its pending record is identity- and epoch-fenced above; adopt
+    // only the exact record captured for this now-active TUI session.
+    const pendingNativePrompt = this.pendingLifecycle?.epoch === epoch
+      && this.pendingLifecycle.id === current.id
+      && this.pendingLifecycle.manager === current.manager
+      && this.pendingLifecycle.nativePromptWaiting;
+    this.nativePromptEpoch = pendingNativePrompt ? epoch : null;
     this.inputNotificationPending = false;
     this.inputNotificationAttempted = false;
     this.inputNotificationTransitions = 0;
@@ -321,6 +339,12 @@ export class PresenceRuntime {
       this.teardownLocal();
       this.discardPendingLifecycle(epoch);
       return;
+    }
+    // A pending native edge becomes live only after this exact consumer owns
+    // the TUI session. It can then drive companion state and one deferred toast.
+    if (this.nativePromptWaiting()) {
+      this.syncCompanionBlocked();
+      this.syncInputNotification(true);
     }
     // Claim only after this lane has retired this runtime's prior authority and
     // activation succeeded. A later stale teardown sees a different generation
@@ -364,6 +388,9 @@ export class PresenceRuntime {
     // No await may separate the clean-pass check from this release.
     this.outputReady = true;
     this.initialProjectionInFlight = false;
+    // A native start accepted while output was closed is a live edge, unlike
+    // retained V2 replay, and dispatches exactly once after its stable render.
+    this.syncInputNotification();
     // Retained terminals get their normal bounded metadata lifetime, but never a toast.
     this.scheduleTerminalClear();
     // Consumer activation may synchronously replay retained V2 state. It is
@@ -414,6 +441,33 @@ export class PresenceRuntime {
     this.activateLocalCandidates();
   }
 
+  /** Native prompts retain only a boolean, first in the exact pending TUI record and then in its active epoch. */
+  handleUiPromptStart(context: unknown) {
+    if (!isTuiCallback(context)) return;
+    const fence = this.activeSessionFence(context);
+    if (fence) {
+      if (this.nativePromptEpoch === fence.epoch) return;
+      this.nativePromptEpoch = fence.epoch;
+      this.syncNativePromptState(true);
+      return;
+    }
+    const pending = this.pendingSession(context);
+    if (pending) pending.nativePromptWaiting = true;
+  }
+
+  handleUiPromptEnd(context: unknown) {
+    if (!isTuiCallback(context)) return;
+    const fence = this.activeSessionFence(context);
+    if (fence) {
+      if (this.nativePromptEpoch !== fence.epoch) return;
+      this.nativePromptEpoch = null;
+      this.syncNativePromptState();
+      return;
+    }
+    const pending = this.pendingSession(context);
+    if (pending) pending.nativePromptWaiting = false;
+  }
+
   private accept(event: PresenceEventV2) {
     // activate() synchronously replays retained producer state and ready. Once
     // it returns, accepted events are live even though authority output may
@@ -426,7 +480,7 @@ export class PresenceRuntime {
       if (!event.attention) this.externalAttention.remove(event.source);
       this.states.set(event.source, event);
       this.syncCompanionBlocked();
-      const inputPresent = [...this.states.values()].some(isInteractionWaiting);
+      const inputPresent = this.inputWaiting();
       const suppressed = [...this.states.values()].some(candidate => candidate.state === "error" || candidate.attention?.reason === "failure");
       // Retained activation replay is state reconstruction, never an alert.
       if (!this.outputReady || deferLiveNotification) {
@@ -450,7 +504,7 @@ export class PresenceRuntime {
     this.states.delete(event.source);
     this.externalAttention.remove(event.source);
     this.syncCompanionBlocked();
-    const inputPresent = [...this.states.values()].some(isInteractionWaiting);
+    const inputPresent = this.inputWaiting();
     const suppressed = [...this.states.values()].some(candidate => candidate.state === "error" || candidate.attention?.reason === "failure");
     if (!this.outputReady || deferLiveNotification) {
       if (deferLiveNotification) this.appendPendingNotification({ kind: "withdraw", inputPresent, suppressed, acceptedAt: this.nextNotificationAcceptanceTime() });
@@ -500,6 +554,15 @@ export class PresenceRuntime {
   }
   private isIngressOpen(): boolean { return this.ingressEpoch === this.epoch; }
   private canOutput(): boolean { return this.isIngressOpen() && this.rootSession && this.consumerActive && this.outputReady; }
+  private nativePromptWaiting(): boolean { return this.nativePromptEpoch === this.epoch && this.rootSession && this.ownerEpoch === this.epoch; }
+  private inputWaiting(): boolean { return this.nativePromptWaiting() || [...this.states.values()].some(isInteractionWaiting); }
+  private syncNativePromptState(liveInput = false) {
+    this.syncCompanionBlocked();
+    if (this.initialProjectionInFlight) this.initialProjectionDirty = true;
+    if (!this.outputReady) { this.syncInputNotification(liveInput); return; }
+    this.render();
+    this.syncInputNotification(liveInput);
+  }
   private discardPendingLifecycle(epoch: number) { if (this.pendingLifecycle?.epoch === epoch) this.pendingLifecycle = null; }
   private abandonStartup(epoch: number) { this.discardPendingLifecycle(epoch); }
   private hasActiveSessionContext(context: unknown): context is ContextUsageProvider { return this.activeSessionFence(context) !== undefined; }
@@ -646,7 +709,7 @@ export class PresenceRuntime {
       const stateOrdinal = this.consumeLocalOrdinal();
       const terminalOrdinal = this.consumeLocalOrdinal();
       if (stateOrdinal && terminalOrdinal) {
-        this.publishPi(this.terminal, this.terminal === "error" ? "failure" : undefined, stateOrdinal);
+        this.publishPi(this.terminal, stateOrdinal);
         if (this.localPiActive && this.localPi && this.terminalEventId < MAX_INTEGER) {
           this.terminalEventId += 1;
           this.localPi.publishTerminal({ version: 2, generation: terminalOrdinal.generation, sequence: terminalOrdinal.sequence, source: "pi", eventId: this.terminalEventId, outcome: this.terminal === "error" ? "failed" : this.terminal === "cancelled" ? "cancelled" : "completed" });
@@ -725,6 +788,7 @@ export class PresenceRuntime {
     if (!this.shutdownSessionFence(context) && !this.pendingShutdownFence(context)) return;
     // Fence and abort observer eligibility before queued lifecycle teardown.
     this.releaseCompanionBlocked();
+    this.nativePromptEpoch = null;
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
     ++this.epoch;
@@ -740,14 +804,17 @@ export class PresenceRuntime {
     return processCoordinator.enqueueAuthority(() => this.transition(() => this.teardown()));
   }
 
-  private publish(state: PresenceStateInputV2["state"], reason?: "failure") {
+  private publish(state: "idle" | "running") {
     if (!this.rootSession) return;
     const ordinal = this.nextLocalOrdinal();
-    if (ordinal) this.publishPi(state, reason, ordinal);
+    if (ordinal) this.publishPi(state, ordinal);
   }
 
-  private publishPi(state: PresenceStateInputV2["state"], reason: "failure" | undefined, ordinal: { generation: number; sequence: number }) {
-    const snapshot: PresenceStateInputV2 = { version: 2, generation: ordinal.generation, sequence: ordinal.sequence, source: "pi", state, ...(reason ? { attention: { reason, occurrence: "new" as const } } : {}) };
+  private publishPi(state: PresenceStateInputV2["state"], ordinal: { generation: number; sequence: number }) {
+    const base = { version: 2 as const, generation: ordinal.generation, sequence: ordinal.sequence, source: "pi" as const };
+    const snapshot: PresenceStateInputV2 = state === "error"
+      ? { ...base, state, attention: { reason: "failure", occurrence: "new" } }
+      : { ...base, state };
     this.lastPiState = snapshot;
     if (this.localPiActive) this.localPi?.publishState(snapshot);
   }
@@ -826,10 +893,10 @@ export class PresenceRuntime {
     this.localTodoActive = false;
   }
 
-  /** Bridge the aggregate V2 ask_user state into Herdr's managed counter only. */
+  /** Bridge aggregate native-or-V2 input waiting into Herdr's managed counter only. */
   private syncCompanionBlocked() {
     if (this.mode !== "companion") return;
-    const active = [...this.states.values()].some(isInteractionWaiting);
+    const active = this.inputWaiting();
     if (active === this.companionBlocked) return;
     this.companionBlocked = active;
     try {
@@ -845,7 +912,7 @@ export class PresenceRuntime {
   }
 
   /** One live input lifecycle yields at most one alert; retained replay only restores pane state. */
-  private syncInputNotification(liveInput = false, inputPresent = [...this.states.values()].some(isInteractionWaiting), suppressed = [...this.states.values()].some(event => event.state === "error" || event.attention?.reason === "failure")) {
+  private syncInputNotification(liveInput = false, inputPresent = this.inputWaiting(), suppressed = [...this.states.values()].some(event => event.state === "error" || event.attention?.reason === "failure")) {
     if (!inputPresent) { this.inputLifecycleActive = false; this.inputNotificationPending = false; this.inputNotificationAttempted = false; return; }
     if (!this.inputLifecycleActive) this.inputLifecycleActive = true;
     if (this.inputNotificationAttempted) return;
@@ -864,10 +931,11 @@ export class PresenceRuntime {
     const internalStartupOutput = startup && this.initialProjectionInFlight && this.isIngressOpen() && this.rootSession && this.consumerActive;
     if ((!this.canOutput() && !internalStartupOutput) || !ref || !client) return;
     const events = [...this.states.values()];
-    const state = compositeState(events, this.active);
+    const nativePromptWaiting = this.nativePromptWaiting();
+    const state = compositeState(events, this.active, nativePromptWaiting);
     const terminals = this.currentTerminalBatch();
-    if (this.mode === "standalone") await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
-    const tokens = metadata(events, terminals, this.usage.snapshot(), this.active, state, this.latestTerminalOutcome());
+    if (this.mode === "standalone") await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active, nativePromptWaiting));
+    const tokens = metadata(events, terminals, this.usage.snapshot(), this.active, state, this.latestTerminalOutcome(), nativePromptWaiting);
     this.workspaceLease.update(tokens.summary);
     await client.metadata(presentation(), tokens);
   }
@@ -877,17 +945,18 @@ export class PresenceRuntime {
     const client = this.client;
     if (!this.canOutput() || !ref || !client) return;
     const events = [...this.states.values()];
-    const state = compositeState(events, this.active);
-    if (this.mode === "standalone") void client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active));
+    const nativePromptWaiting = this.nativePromptWaiting();
+    const state = compositeState(events, this.active, nativePromptWaiting);
+    if (this.mode === "standalone") void client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active, nativePromptWaiting));
     this.renderMetadata(events, client, state);
 
     this.dispatchStateAttention(attention);
   }
 
   /** Metadata-only refreshes must not repeat an unchanged pane agent report. */
-  private renderMetadata(events = [...this.states.values()], client = this.client, state = compositeState(events, this.active)) {
+  private renderMetadata(events = [...this.states.values()], client = this.client, state = compositeState(events, this.active, this.nativePromptWaiting())) {
     if (!this.canOutput() || !client) return;
-    const tokens = metadata(events, this.currentTerminalBatch(), this.usage.snapshot(), this.active, state, this.latestTerminalOutcome());
+    const tokens = metadata(events, this.currentTerminalBatch(), this.usage.snapshot(), this.active, state, this.latestTerminalOutcome(), this.nativePromptWaiting());
     this.workspaceLease.update(tokens.summary);
     void client.metadata(presentation(), tokens);
   }
@@ -1144,7 +1213,7 @@ export class PresenceRuntime {
     if (!ordinal || !(source === "pi" ? this.localPiActive : this.localTodoActive)) return;
     const { generation: _generation, sequence: _sequence, ...fields } = previous;
     const snapshot = { ...fields, generation: ordinal.generation, sequence: ordinal.sequence } as PresenceStateInputV2;
-    if (source === "pi") this.publishPi(snapshot.state, snapshot.attention?.reason === "failure" ? "failure" : undefined, ordinal);
+    if (source === "pi") this.publishPi(snapshot.state, ordinal);
     else this.publishTodo(snapshot);
   }
 
@@ -1191,6 +1260,7 @@ export class PresenceRuntime {
     this.ownerEpoch = 0;
     this.active = false;
     this.rootSession = false;
+    this.nativePromptEpoch = null;
     this.inputLifecycleActive = false;
     this.notifications.clear();
     this.notificationRate.clear();

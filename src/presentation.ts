@@ -41,18 +41,18 @@ const compareProgress = (left: PresenceStateV2, right: PresenceStateV2) =>
   || left.generation - right.generation || left.sequence - right.sequence;
 const subagents = (events: readonly PresenceStateV2[]): Subagents | undefined => events.find(event => event.source === "subagent")?.subagents;
 
-export function blockedPresentationCategory(events: readonly PresenceStateV2[]): BlockedCategory {
-  return events.some(isInteractionWaiting) ? "ask-user" : "blocked";
+export function blockedPresentationCategory(events: readonly PresenceStateV2[], nativePromptWaiting = false): BlockedCategory {
+  return nativePromptWaiting || events.some(isInteractionWaiting) ? "ask-user" : "blocked";
 }
-export function compositeState(events: readonly PresenceStateV2[], active: boolean): HerdrState {
-  if (events.some(hasFailure) || events.some(hasBlockedAttention) || events.some(isInteractionWaiting)) return "blocked";
+export function compositeState(events: readonly PresenceStateV2[], active: boolean, nativePromptWaiting = false): HerdrState {
+  if (nativePromptWaiting || events.some(hasFailure) || events.some(hasBlockedAttention) || events.some(isInteractionWaiting)) return "blocked";
   if (active || events.some(event => event.state === "running" || event.state === "waiting")) return "working";
   return "idle";
 }
 /** Only fixed, privacy-safe strings reach pane state messages and labels. */
-export function safeMessage(state: HerdrState, max: number, events: readonly PresenceStateV2[] = [], parentActive = false): string {
+export function safeMessage(state: HerdrState, max: number, events: readonly PresenceStateV2[] = [], parentActive = false, nativePromptWaiting = false): string {
   const aggregate = subagents(events);
-  const category = blockedPresentationCategory(events);
+  const category = blockedPresentationCategory(events, nativePromptWaiting);
   const text = state === "blocked"
     ? category === "ask-user" ? "Pi needs your input" : "Pi needs attention"
     : state === "working" && parentActive ? "Pi is working"
@@ -75,9 +75,9 @@ function terminalSegment(outcome: LatestTerminalOutcome): string | undefined {
   return outcome === "completed" || outcome === "cancelled" || outcome === "failed" ? `terminal ${outcome}` : undefined;
 }
 /** A bounded fixed-order grammar; terminal outcome is arrival-derived, never canonical-sort-derived. */
-function summary(events: readonly PresenceStateV2[], state: HerdrState, progressToken: string | null, interactionToken: string | null, latestTerminal?: LatestTerminalOutcome): string {
+function summary(events: readonly PresenceStateV2[], state: HerdrState, progressToken: string | null, interactionToken: string | null, latestTerminal?: LatestTerminalOutcome, nativePromptWaiting = false): string {
   const aggregate = subagents(events);
-  const stateSegment = state === "blocked" && interactionToken ? "input" : state;
+  const stateSegment = state === "blocked" && (interactionToken || nativePromptWaiting) ? "input" : state;
   // Blocking, input, and failure all resolve to blocked and intentionally hide
   // the transient terminal. Otherwise retain semantic working/idle plus the
   // newest accepted terminal arrival as a closed trailing segment.
@@ -96,7 +96,8 @@ function summary(events: readonly PresenceStateV2[], state: HerdrState, progress
 }
 
 /** Ten local Herdr keys: every unavailable datum except derived summary is null. */
-export function metadata(events: readonly PresenceStateV2[], terminals?: TerminalBatch, usage?: Usage, parentActive = false, state = compositeState(events, parentActive), latestTerminal?: LatestTerminalOutcome): HerdrMetadataTokens {
+export function metadata(events: readonly PresenceStateV2[], terminals?: TerminalBatch, usage?: Usage, parentActive = false, state?: HerdrState, latestTerminal?: LatestTerminalOutcome, nativePromptWaiting = false): HerdrMetadataTokens {
+  const effectiveState = state ?? compositeState(events, parentActive, nativePromptWaiting);
   const progress = [...events].filter(event => event.progress).sort(compareProgress)[0]?.progress;
   const attention = [...events].filter(event => event.attention).sort(compareAttention)[0]?.attention;
   const interaction = events.find(isInteractionWaiting)?.interaction;
@@ -107,7 +108,7 @@ export function metadata(events: readonly PresenceStateV2[], terminals?: Termina
   const subagentValues = aggregate && [aggregate.running, aggregate.cancelling, aggregate.queued, aggregate.completed, aggregate.failed, aggregate.cancelled, aggregate.omitted];
   const subagentToken = subagentValues?.every(value => count(value) !== undefined) ? subagentValues.join(",") : null;
   return {
-    summary: summary(events, state, progressToken, interactionToken, latestTerminal),
+    summary: summary(events, effectiveState, progressToken, interactionToken, latestTerminal, nativePromptWaiting),
     v2_progress: progressToken,
     v2_attention: attentionToken,
     v2_interaction: interactionToken,

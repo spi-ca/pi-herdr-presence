@@ -8,9 +8,9 @@ bun run ci
 bun pm pack --dry-run
 ```
 
-`@pi/presence` is pinned exactly to `github:spi-ca/pi-presence#v2-20260818-2`. Do not use a range, sibling path dependency, or the retired package name. Following the Pi `0.84.2` package convention, the non-optional `@earendil-works/pi-coding-agent` peer range is `*`; development types use `^0.84.2` and the current frozen lock resolution. Keep `agent_end` terminal derivation and `agent_settled` settlement as separate callbacks; do not add event-registration fallback or runtime-version shims.
+`@pi/presence` is pinned exactly to `github:spi-ca/pi-presence#v2-20260828-1`. Do not use a range, sibling path dependency, or the retired package name. Pi development types are pinned exactly to `@earendil-works/pi-coding-agent@0.84.4`; the non-optional peer range remains `*`. Register `ui_prompt_start` and `ui_prompt_end` directly through the Pi `0.84.4` `ExtensionAPI`; do not add event-registration fallback, unsafe casts, or runtime-version shims. Keep `agent_end` terminal derivation and `agent_settled` settlement as separate callbacks.
 
-Extension scope is Herdr socket transport, managed-authority detection, lifecycle-to-pane reporting, fixed safe presentation, exact ten-token projection, and the workspace-summary lease. Shared V2 protocol and lifecycle behavior are canonical in the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260818-2/fixtures/normative.json). Upstream Herdr and Pi core are out of scope.
+Extension scope is Herdr socket transport, managed-authority detection, lifecycle-to-pane reporting, fixed safe presentation, exact ten-token projection, aggregate native TUI prompt and accepted V2 `ask_user` waiting state, and the workspace-summary lease. Shared V2 protocol and lifecycle behavior are canonical in the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/fixtures/normative.json). Upstream Herdr and Pi core are out of scope.
 
 ## Checks and coverage
 
