@@ -306,10 +306,12 @@ serial(
 			const i = producer("interaction");
 			const s = producer("subagent");
 			i.publishState(input(1));
+			// This follows the lifecycle acceptance edge synchronously, inside the
+			// bounded input/failure arbitration window.
+			s.publishState(failure(1));
 			await eventually(() =>
 				expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true),
 			);
-			s.publishState(failure(1));
 			await sleep(80);
 			// A failure accepted during this admitted aggregate input lifecycle is
 			// attached to it and therefore does not create a competing alert.
@@ -361,6 +363,21 @@ serial(
 		}),
 );
 serial(
+	"a long-lived native prompt ending immediately before failure does not suppress it",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const context = (runtime as unknown as { context: object }).context;
+			runtime.handleUiPromptStart(context);
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await sleep(30);
+			runtime.handleUiPromptEnd(context);
+			producer("subagent").publishState(failure(1));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+		}),
+);
+serial(
 	"V2 failure then input then withdrawal retains the admitted input arbitration",
 	async () =>
 		withRuntime({}, async ({ producer, requests }) => {
@@ -384,6 +401,21 @@ serial(
 			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
 			await sleep(30);
 			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+		}),
+);
+serial(
+	"a long-lived V2 prompt ending immediately before failure does not suppress it",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			const interaction = producer("interaction");
+			interaction.publishState(input(1));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await sleep(30);
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			producer("subagent").publishState(failure(1));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
 		}),
 );
 serial(
