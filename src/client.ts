@@ -32,6 +32,8 @@ const WORKSPACE_OBSERVER_KEYS = [
 const ORDINARY_SUCCESS_TTL_MS = 5_000;
 /** Herdr's fixed session projection is intentionally ID-only; paths are never sent. */
 export type SessionRef = { agent_session_id: string };
+/** Queue protection and audible feedback are deliberately independent notification choices. */
+export type NotificationOptions = { actionable: boolean; sound: "none" | "done" | "request" };
 
 /** One request per connection is enforced by HerdrSocketTransport; this client never subscribes. */
 export class PresenceClient {
@@ -347,7 +349,7 @@ export class PresenceClient {
 	notify(
 		title: string,
 		body: string,
-		actionable: boolean,
+		options: NotificationOptions,
 		key = "default",
 	): boolean {
 		if (!this.config.notifications || this.closed || this.closing) return false;
@@ -357,7 +359,7 @@ export class PresenceClient {
 			line = encodeHerdrRequest({
 				id,
 				method: "notification.show",
-				params: { title, body, sound: actionable ? "request" : "done" },
+				params: { title, body, sound: options.sound },
 			});
 		} catch {
 			return false;
@@ -373,7 +375,7 @@ export class PresenceClient {
 			this.config.timeoutMs,
 			undefined,
 			undefined,
-			actionable ? "actionable" : "replaceable",
+			options.actionable ? "actionable" : "replaceable",
 			(value) => {
 				receivedAdmission = true;
 				admitted = value;

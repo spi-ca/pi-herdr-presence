@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createPresenceProducer } from "@pi/presence";
 import { resolvePresenceConfig } from "../src/config.js";
 import { registerPresenceHooks } from "../src/hooks.js";
-import { PresenceRuntime } from "../src/runtime.js";
+import { PresenceRuntime, type LongRunningScheduler } from "../src/runtime.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
 type Request = { id: string; method: string; params: Record<string, unknown> };
@@ -46,6 +46,36 @@ function restore(saved: Record<string, string | undefined>) {
 
 function activeContext(runtime: PresenceRuntime) {
   return { sessionManager: (runtime as unknown as { sessionManager: unknown }).sessionManager };
+}
+
+class ManualLongRunningScheduler implements LongRunningScheduler {
+  private time = 0;
+  private nextId = 0;
+  private readonly timers = new Map<number, { due: number; callback: () => void }>();
+
+  now() { return this.time; }
+  setTimeout(callback: () => void, delayMs: number) {
+    const id = ++this.nextId;
+    this.timers.set(id, { due: this.time + delayMs, callback });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }
+  clearTimeout(timer: ReturnType<typeof setTimeout>) {
+    this.timers.delete(timer as unknown as number);
+  }
+  advance(milliseconds: number) {
+    const target = this.time + milliseconds;
+    while (true) {
+      const next = [...this.timers.entries()]
+        .filter(([, timer]) => timer.due <= target)
+        .sort(([, left], [, right]) => left.due - right.due)[0];
+      if (!next) break;
+      const [id, timer] = next;
+      this.timers.delete(id);
+      this.time = timer.due;
+      timer.callback();
+    }
+    this.time = target;
+  }
 }
 
 serial("a live edge during the stalled initial report gets latest metadata before its one notification", async () => {
@@ -248,6 +278,57 @@ serial("pending native prompts are discarded on replacement and shutdown", async
     expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
     expect("inputNotificationTimer" in (runtime as object)).toBe(false);
   } finally {
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("a pending agent end during stalled startup clears the long-running timer", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-agent-end-timer-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let releaseReport!: () => void;
+  let reportSeen!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.report_agent") { reportSeen(); await reportGate; }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const clock = new ManualLongRunningScheduler();
+  const runtime = new PresenceRuntime(
+    bus as never,
+    { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "background", longRunningMs: 20, finalClearMs: 1_000 },
+    undefined,
+    undefined,
+    clock,
+  );
+  const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession(context);
+    await seenReport;
+    runtime.handleAgentStart(context);
+    runtime.handleAgentEnd({}, context);
+    releaseReport();
+    await starting;
+
+    const internal = runtime as unknown as { longRunningTimer: unknown; longRunningRemaining: number | null; longRunningArmedAt: number | null };
+    expect(internal.longRunningTimer).toBeUndefined();
+    expect(internal.longRunningRemaining).toBeNull();
+    expect(internal.longRunningArmedAt).toBeNull();
+    clock.advance(100);
+    await pause();
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi is still working")).toHaveLength(0);
+  } finally {
+    releaseReport?.();
     await runtime.shutdownSession(activeContext(runtime));
     restore(saved);
     await server.close();

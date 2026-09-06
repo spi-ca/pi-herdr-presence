@@ -9,7 +9,7 @@ import {
 	type PresenceSource,
 } from "@pi/presence";
 import { resolvePresenceConfig } from "../src/config.js";
-import { PresenceRuntime } from "../src/runtime.js";
+import { PresenceRuntime, type LongRunningScheduler } from "../src/runtime.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
 type Request = {
@@ -76,6 +76,9 @@ function eventBus() {
 async function withRuntime(
 	config: Partial<ReturnType<typeof resolvePresenceConfig>>,
 	body: (h: Harness) => Promise<void>,
+	longRunningScheduler?: LongRunningScheduler,
+	beforeStart?: (h: Harness) => void,
+	startContext: object = { mode: "tui", sessionManager: { getSessionId: () => "session" } },
 ) {
 	const directory = await fs.mkdtemp(
 		join(os.tmpdir(), "herdr-v2-actionable-"),
@@ -108,6 +111,9 @@ async function withRuntime(
 			maxQueue: 128,
 			...config,
 		},
+		undefined,
+		undefined,
+		longRunningScheduler,
 	);
 	try {
 		Object.assign(process.env, {
@@ -138,12 +144,8 @@ async function withRuntime(
 				return producer;
 			},
 		};
-		await runtime.startSession({
-			mode: "tui",
-			sessionManager: {
-				getSessionId: () => "session",
-			},
-		});
+		beforeStart?.(h);
+		await runtime.startSession(startContext);
 		await body(h);
 	} finally {
 		try {
@@ -172,6 +174,36 @@ const tokens = (request: Request) =>
 	request.params?.tokens as Record<string, string | null>;
 const attention = (requests: Request[], value: string) =>
 	metas(requests).some((request) => tokens(request).v2_attention === value);
+
+class ManualLongRunningScheduler implements LongRunningScheduler {
+	private time = 0;
+	private nextId = 0;
+	private readonly timers = new Map<number, { due: number; callback: () => void }>();
+	now() { return this.time; }
+	setTimeout(callback: () => void, delayMs: number) {
+		const id = ++this.nextId;
+		this.timers.set(id, { due: this.time + delayMs, callback });
+		return id as unknown as ReturnType<typeof setTimeout>;
+	}
+	clearTimeout(timer: ReturnType<typeof setTimeout>) {
+		this.timers.delete(timer as unknown as number);
+	}
+	elapse(milliseconds: number) { this.time += milliseconds; }
+	advance(milliseconds: number) {
+		const target = this.time + milliseconds;
+		while (true) {
+			const due = [...this.timers.entries()]
+				.filter(([, timer]) => timer.due <= target)
+				.sort(([, left], [, right]) => left.due - right.due)[0];
+			if (!due) break;
+			const [id, timer] = due;
+			this.timers.delete(id);
+			this.time = timer.due;
+			timer.callback();
+		}
+		this.time = target;
+	}
+}
 const error = (sequence: number, generation = 1) => ({
 	version: 2 as const,
 	generation,
@@ -455,6 +487,118 @@ serial(
 		expect(notices(requests).length).toBeGreaterThan(0);
 		expect(notices(requests).length).toBeLessThanOrEqual(9);
 	}),
+);
+serial(
+	"long-running time pauses for native input and resumes with a silent notification",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		await withRuntime({ notificationPolicy: "background", longRunningMs: 30 }, async ({ runtime, requests }) => {
+			const context = (runtime as unknown as { context: object }).context;
+			runtime.handleAgentStart(context);
+			clock.advance(10);
+			runtime.handleUiPromptStart(context);
+			clock.advance(100);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			runtime.handleUiPromptEnd(context);
+			clock.advance(19);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			clock.advance(1);
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working").map(request => request.params)).toEqual([
+				{ title: "Pi is still working", body: "A Pi task is taking longer than expected", sound: "none" },
+			]));
+		}, clock);
+	},
+);
+serial(
+	"long-running time pauses for V2 blocked and failure state and does not double-resume overlapping input",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		await withRuntime({ notificationPolicy: "background", longRunningMs: 30 }, async ({ runtime, producer, requests }) => {
+			const context = (runtime as unknown as { context: object }).context;
+			const subagent = producer("subagent");
+			const interaction = producer("interaction");
+			runtime.handleAgentStart(context);
+			clock.advance(5);
+			subagent.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } });
+			clock.advance(50);
+			subagent.publishState({ version: 2, generation: 1, sequence: 2, source: "subagent", state: "running" });
+			clock.advance(5);
+			subagent.publishState(error(3));
+			clock.advance(50);
+			subagent.publishState({ version: 2, generation: 1, sequence: 4, source: "subagent", state: "running" });
+			runtime.handleUiPromptStart(context);
+			interaction.publishState(input(1));
+			runtime.handleUiPromptEnd(context);
+			clock.advance(100);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			clock.advance(20);
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+		}, clock);
+	},
+);
+serial(
+	"elapsed work held behind a blocked callback fires only after working resumes",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		await withRuntime({ notificationPolicy: "background", longRunningMs: 20 }, async ({ runtime, requests }) => {
+			const context = (runtime as unknown as { context: object }).context;
+			runtime.handleAgentStart(context);
+			clock.elapse(20);
+			runtime.handleUiPromptStart(context);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			runtime.handleUiPromptEnd(context);
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+		}, clock);
+	},
+);
+serial(
+	"retained blocked reload starts the long-running budget only after composite working resumes",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		const sessionManager = { getSessionId: () => "reload" };
+		let subagent!: PresenceProducerHandle;
+		await withRuntime(
+			{ notificationPolicy: "background", longRunningMs: 20 },
+			async ({ requests }) => {
+				clock.advance(100);
+				expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+				subagent.publishState({ version: 2, generation: 1, sequence: 2, source: "subagent", state: "running" });
+				clock.advance(20);
+				await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			},
+			clock,
+			({ producer }) => {
+				subagent = producer("subagent");
+				subagent.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } });
+			},
+			{ mode: "tui", isIdle: () => false, sessionManager },
+		);
+	},
+);
+serial(
+	"agent end, settlement, replacement, and shutdown clear long-running state",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		await withRuntime({ notificationPolicy: "background", longRunningMs: 20 }, async ({ runtime, requests }) => {
+			const internal = runtime as unknown as { context: object; longRunningRemaining: number | null; longRunningTimer: unknown };
+			const context = internal.context;
+			runtime.handleAgentStart(context);
+			runtime.handleAgentEnd({}, context);
+			expect(internal.longRunningRemaining).toBeNull();
+			runtime.handleAgentSettled({ ...(context as object), isIdle: () => true });
+			runtime.handleAgentStart(context);
+			await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "replacement" } });
+			expect(internal.longRunningRemaining).toBeNull();
+			const replacement = internal.context;
+			runtime.handleAgentStart(replacement);
+			await runtime.shutdownSession(replacement);
+			expect(internal.longRunningRemaining).toBeNull();
+			clock.advance(100);
+			await sleep();
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+		}, clock);
+	},
 );
 
 });

@@ -159,7 +159,7 @@ test("ordinary state and notification output preempt a stalled workspace observe
   await Promise.all([
     observer,
     client.report("working", { agent_session_id: "session" }),
-    client.notify("Pi needs attention", "A Pi task needs attention", true),
+    client.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" }),
   ]);
 
   expect(requests.map(request => request.method)).toEqual([

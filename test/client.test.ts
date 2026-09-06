@@ -127,7 +127,7 @@ test("a failed legacy migration is one bounded attempt and does not block normal
   });
 
   await presence.metadata(presentation(), idleTokens);
-  await presence.notify("Pi needs attention", "A Pi task needs attention", true);
+  await presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
 
   expect(requests.map((request) => request.method)).toEqual(["pane.report_metadata", "pane.report_metadata", "pane.report_metadata", "notification.show"]);
   expectExactMetadataClear(requests[0]!.params);
@@ -257,7 +257,7 @@ test("invalid sequence clocks make fire-and-forget lifecycle output fail closed 
       void presence.metadata(presentation(), nullTokens);
       void presence.clearLegacyMetadata();
       void presence.clearMetadata();
-      void presence.notify("Pi needs attention", "A Pi task needs attention", true);
+      void presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
       void presence.teardown();
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(fake.requests.map(request => request.method)).toEqual(["notification.show"]);
@@ -620,7 +620,7 @@ test("notification response failures are contained without retrying or unhandled
         async close() {},
       });
 
-      expect(presence.notify("Pi needs attention", "A Pi task needs attention", true)).toBe(true);
+      expect(presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" })).toBe(true);
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({ method: "notification.show" });
@@ -644,7 +644,7 @@ test("fencing synchronously cancels outstanding notification keys", async () => 
     async close() {},
   });
 
-  expect(presence.notify("Pi needs your input", "Pi needs your input", true, "input:1")).toBe(true);
+  expect(presence.notify("Pi needs your input", "Pi needs your input", { actionable: true, sound: "request" }, "input:1")).toBe(true);
   presence.fenceOrdinaryOutput();
   expect(cancelled).toContain("notification:input:1");
   settle();
@@ -653,7 +653,7 @@ test("fencing synchronously cancels outstanding notification keys", async () => 
   expect((presence as unknown as { outstandingNotificationKeys: Map<string, number> }).outstandingNotificationKeys.size).toBe(0);
 });
 
-test("client assigns notification lanes and sounds from actionability", async () => {
+test("client separates notification queue lanes from sounds", async () => {
   const requests: Request[] = [];
   const lanes: string[] = [];
   const transport = {
@@ -667,11 +667,13 @@ test("client assigns notification lanes and sounds from actionability", async ()
     async close() {},
   };
   const presence = client(transport);
-  await presence.notify("Pi needs attention", "A Pi task needs attention", true);
-  await presence.notify("Pi activity completed", "Pi activity completed", false);
+  await presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
+  await presence.notify("Pi activity completed", "Pi activity completed", { actionable: false, sound: "done" });
+  await presence.notify("Pi is still working", "A Pi task is taking longer than expected", { actionable: false, sound: "none" });
 
-  expect(requests).toHaveLength(2);
+  expect(requests).toHaveLength(3);
   expect(requests[0]).toMatchObject({ method: "notification.show", params: { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" } });
   expect(requests[1]).toMatchObject({ method: "notification.show", params: { title: "Pi activity completed", body: "Pi activity completed", sound: "done" } });
-  expect(lanes).toEqual(["actionable", "replaceable"]);
+  expect(requests[2]).toMatchObject({ method: "notification.show", params: { title: "Pi is still working", body: "A Pi task is taking longer than expected", sound: "none" } });
+  expect(lanes).toEqual(["actionable", "replaceable", "replaceable"]);
 });
