@@ -263,6 +263,49 @@ describe("transport module: queue and deadline behavior", () => {
 		await queue.close();
 	});
 
+	test("an admitted actionable reservation survives queue wait and dispatches FIFO", async () => {
+		const queue = new BoundedSocketQueue(1);
+		let releaseActive!: () => void;
+		const active = queue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releaseActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const actionable = queue.enqueue(
+			async () => "notification",
+			"notification",
+			false,
+			Date.now() + 1,
+			undefined,
+			"actionable",
+		);
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		releaseActive();
+		await expect(active).resolves.toBe("active");
+		await expect(actionable).resolves.toBe("notification");
+		await queue.close();
+	});
+
+	test("reports synchronous admission only after queue insertion and rejects a full protected queue", async () => {
+		const queue = new BoundedSocketQueue(1);
+		let releaseActive!: () => void;
+		const active = queue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releaseActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const receipts: boolean[] = [];
+		const protectedPending = queue.enqueue(async () => "protected", "protected", false, undefined, undefined, "protected", (admitted) => receipts.push(admitted));
+		const rejected = queue.enqueue(async () => "notification", "notification", false, undefined, undefined, "actionable", (admitted) => receipts.push(admitted));
+
+		expect(receipts).toEqual([true, false]);
+		await expect(rejected).rejects.toThrow("queue is full");
+		releaseActive();
+		await expect(active).resolves.toBe("active");
+		await expect(protectedPending).resolves.toBe("protected");
+		await queue.close();
+	});
+
 	test("continues FIFO dispatch after an active request fails", async () => {
 		const queue = new BoundedSocketQueue(2);
 		const started: string[] = [];

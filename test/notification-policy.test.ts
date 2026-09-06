@@ -61,6 +61,17 @@ describe("notification policy module", () => {
     expect(limiter.accept("error", 101)).toBe(true);
   });
 
+  test("preflight leaves rate capacity untouched until synchronous admission commits", () => {
+    const limiter = new NotificationRateLimiter(100, 1);
+
+    expect(limiter.canAccept("other", 0)).toBe(true);
+    expect(limiter.canAccept("other", 0)).toBe(true);
+    expect(limiter.commit("other", 0)).toBe(true);
+    expect(limiter.canAccept("other", 1)).toBe(false);
+    expect(limiter.canAccept("input", 1)).toBe(true);
+    expect(limiter.commit("input", 1)).toBe(true);
+  });
+
   test("removes and resets external attention transition state", () => {
     const transitions = new ExternalAttentionTransitions(2);
 

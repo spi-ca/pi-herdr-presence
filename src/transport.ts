@@ -260,7 +260,8 @@ export class BoundedSocketQueue {
 		item.reject(error);
 	}
 
-	private failed(error: Error): Promise<string> {
+	private failed(error: Error, onAdmission?: (admitted: boolean) => void): Promise<string> {
+		onAdmission?.(false);
 		const promise = Promise.reject<string>(error);
 		void promise.catch(() => {});
 		return promise;
@@ -320,13 +321,15 @@ export class BoundedSocketQueue {
 		deadlineAt?: number,
 		preemptKeys?: readonly string[],
 		lane: QueueLane = "replaceable",
+		/** Called synchronously: true only after this exact item enters the queue. */
+		onAdmission?: (admitted: boolean) => void,
 	): Promise<string> {
 		if (this.closed)
-			return this.failed(new PresenceTransportError("Socket queue is closed."));
+			return this.failed(new PresenceTransportError("Socket queue is closed."), onAdmission);
 		// Reject before preemption, coalescing, allocation, or drain scheduling so
 		// an expired lifecycle deadline can never start remote work.
-		if (deadlineAt !== undefined && deadlineAt <= Date.now())
-			return this.failed(new PresenceTransportError("Socket request timed out."));
+		if (lane !== "actionable" && deadlineAt !== undefined && deadlineAt <= Date.now())
+			return this.failed(new PresenceTransportError("Socket request timed out."), onAdmission);
 
 		// Non-priority admission must reject before mutating an observer target.
 		// The active item is intentionally absent from `keyed`, so inspect both
@@ -341,6 +344,7 @@ export class BoundedSocketQueue {
 			)
 				return this.failed(
 					new PresenceTransportError("Socket queue key lane conflict."),
+					onAdmission,
 				);
 
 			// Actionable admission is queue-only and deliberately ignores supplied
@@ -358,6 +362,7 @@ export class BoundedSocketQueue {
 							new PresenceTransportError(
 								"Socket queue preemption target lane conflict.",
 							),
+							onAdmission,
 						);
 				}
 			}
@@ -378,6 +383,7 @@ export class BoundedSocketQueue {
 		if (prior && prior.lane !== lane && !priority)
 			return this.failed(
 				new PresenceTransportError("Socket queue key lane conflict."),
+				onAdmission,
 			);
 		if (prior) {
 			const index = this.queue.indexOf(prior);
@@ -408,7 +414,7 @@ export class BoundedSocketQueue {
 				? this.queue.findIndex((item) => item.lane === "replaceable")
 				: -1;
 			if (replaceable < 0)
-				return this.failed(new PresenceTransportError("Socket queue is full."));
+				return this.failed(new PresenceTransportError("Socket queue is full."), onAdmission);
 			const [displaced] = this.queue.splice(replaceable, 1);
 			if (displaced?.key) this.keyed.delete(displaced.key);
 			if (displaced)
@@ -436,12 +442,12 @@ export class BoundedSocketQueue {
 			resolve,
 			reject,
 			settled: false,
-			deadlineAt,
+			deadlineAt: lane === "actionable" ? undefined : deadlineAt,
 		};
-		if (deadlineAt !== undefined) {
+		if (item.deadlineAt !== undefined) {
 			item.timer = setTimeout(
 				() => this.expire(item),
-				Math.max(0, deadlineAt - Date.now()),
+				Math.max(0, item.deadlineAt - Date.now()),
 			);
 			item.timer.unref?.();
 		}
@@ -449,6 +455,7 @@ export class BoundedSocketQueue {
 		if (priority) this.queue.unshift(item);
 		else this.queue.push(item);
 		if (key) this.keyed.set(key, item);
+		onAdmission?.(true);
 		this.start();
 		return promise;
 	}
@@ -557,19 +564,34 @@ export class HerdrSocketTransport {
 		/** Optional caller-owned absolute deadline; relative callers remain compatible. */
 		deadlineAt = Date.now() + timeoutMs,
 		lane: QueueLane = "replaceable",
+		/** Synchronous queue-admission receipt; post-dispatch delivery remains unknown. */
+		onAdmission?: (admitted: boolean) => void,
 	) {
-		const attemptStartedAt = Date.now();
-		// Preserve the caller's lifecycle boundary, while ensuring this queue entry
-		// cannot consume a later retry's share of that lifecycle budget.
-		const attemptDeadlineAt = Math.min(deadlineAt, attemptStartedAt + timeoutMs);
-		if (!Number.isFinite(attemptDeadlineAt) || attemptDeadlineAt <= attemptStartedAt) {
+		const queuedAt = Date.now();
+		// Protected and replaceable lifecycle work retains its caller-owned absolute
+		// deadline. An actionable toast instead reserves bounded queue capacity until
+		// dispatch, then receives its own full socket attempt.
+		const queueDeadlineAt = lane === "actionable"
+			? undefined
+			: Math.min(deadlineAt, queuedAt + timeoutMs);
+		if (
+			!Number.isFinite(timeoutMs) ||
+			timeoutMs <= 0 ||
+			(queueDeadlineAt !== undefined &&
+				(!Number.isFinite(queueDeadlineAt) || queueDeadlineAt <= queuedAt))
+		) {
+			onAdmission?.(false);
 			const failed = Promise.reject<string>(new PresenceTransportError("Socket request timed out."));
 			void failed.catch(() => {});
 			return failed;
 		}
 		return this.queue.enqueue(
 			(signal) => {
-				const remaining = attemptDeadlineAt - Date.now();
+				const dispatchedAt = Date.now();
+				const attemptDeadlineAt = lane === "actionable"
+					? dispatchedAt + timeoutMs
+					: queueDeadlineAt!;
+				const remaining = attemptDeadlineAt - dispatchedAt;
 				if (remaining <= 0)
 					return Promise.reject(new PresenceTransportError("Socket request timed out."));
 				return exchange(
@@ -583,9 +605,10 @@ export class HerdrSocketTransport {
 			},
 			key,
 			priority,
-			attemptDeadlineAt,
+			queueDeadlineAt,
 			preemptKeys,
 			lane,
+			onAdmission,
 		);
 	}
 

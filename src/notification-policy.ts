@@ -36,12 +36,23 @@ export class NotificationRateLimiter {
   private timestamps: number[] = [];
   private readonly actionable = new Set<Exclude<NotificationCooldownKind, "other">>();
   constructor(private readonly windowMs = 60_000, private readonly limit = 8) {}
-  accept(kind: NotificationCooldownKind, now = Date.now()): boolean {
+  private prune(now: number) {
     this.timestamps = this.timestamps.filter(timestamp => timestamp + this.windowMs > now);
-    if (kind !== "other" && !this.actionable.has(kind)) { this.actionable.add(kind); return true; }
-    if (this.timestamps.length >= this.limit) return false;
-    this.timestamps.push(now);
+  }
+  /** Synchronous preflight paired with commit after queue insertion. */
+  canAccept(kind: NotificationCooldownKind, now = Date.now()): boolean {
+    this.prune(now);
+    return (kind !== "other" && !this.actionable.has(kind)) || this.timestamps.length < this.limit;
+  }
+  /** Commit only a request that synchronously entered the transport queue. */
+  commit(kind: NotificationCooldownKind, now = Date.now()): boolean {
+    if (!this.canAccept(kind, now)) return false;
+    if (kind !== "other" && !this.actionable.has(kind)) this.actionable.add(kind);
+    else this.timestamps.push(now);
     return true;
+  }
+  accept(kind: NotificationCooldownKind, now = Date.now()): boolean {
+    return this.commit(kind, now);
   }
   clear() { this.timestamps = []; this.actionable.clear(); }
 }
