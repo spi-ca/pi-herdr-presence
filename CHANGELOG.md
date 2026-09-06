@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Long-running notifications are explicitly local-only: `background` and `all` no longer allow an external source to trigger them, while external success/info eligibility is unchanged.
 - Local long-running notifications now count only active parent-turn composite `working` time. Native/V2 input, blocked attention, and failure state pause one bounded remaining-time budget; settlement, agent end, replacement, and shutdown clear it. The one-per-turn long-running notice uses Herdr sound `none`; errors/input remain `request` and successful completion remains `done`.
 - A live `failure:new` state and failed terminal now share a bounded, one-to-one notification identity only for the same source/generation with exactly adjacent accepted sequences within 100 ms. The correlator retains only the newest unmatched candidate per source; intervening same-source events, repeated failure kinds, semantic exits, non-failed terminals, withdrawals, generation changes, and session boundaries break correlation. The pinned V2 API has no producer deactivation/incarnation event, so silent same-source restarts remain conservatively indistinguishable inside that window.
 - Nearby live failure-attention state and native/V2 input edges now arbitrate once to the fixed request-sound input alert in either arrival order when the input alert passes policy, dedupe, and rate admission. Retained failures no longer block a new input lifecycle, while rejected input, materially earlier already-notified failures, and failed terminal alerts remain separate.
