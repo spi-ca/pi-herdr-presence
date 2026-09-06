@@ -598,9 +598,42 @@ test("agent and metadata semantic caches are independent", async () => {
   expect(fake.requests.filter(request => request.method === "pane.report_metadata")).toHaveLength(3);
 });
 
-test("client sends bounded static notification requests without retrying them", async () => {
-  const fake = recordingTransport();
-  await client(fake.transport).notify("Pi needs attention", "A Pi task needs attention", true);
-  expect(fake.requests).toHaveLength(1);
-  expect(fake.requests[0]).toMatchObject({ method: "notification.show", params: { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" } });
+test("a notification transport failure after dispatch is not retried", async () => {
+  const requests: Request[] = [];
+  const presence = client({
+    async request(line: string) {
+      requests.push(JSON.parse(line) as Request);
+      throw new Error("transport failed after dispatch");
+    },
+    cancel(_key: string) {},
+    async close() {},
+  });
+
+  await presence.notify("Pi needs attention", "A Pi task needs attention", true);
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ method: "notification.show" });
+});
+
+test("client assigns notification lanes and sounds from actionability", async () => {
+  const requests: Request[] = [];
+  const lanes: string[] = [];
+  const transport = {
+    async request(line: string, _key?: string, _priority?: boolean, _timeoutMs?: number, _preempt?: readonly string[], _deadlineAt?: number, lane?: string) {
+      const request = JSON.parse(line) as Request;
+      requests.push(request);
+      lanes.push(lane ?? "missing");
+      return JSON.stringify({ id: request.id, result: {} });
+    },
+    cancel(_key: string) {},
+    async close() {},
+  };
+  const presence = client(transport);
+  await presence.notify("Pi needs attention", "A Pi task needs attention", true);
+  await presence.notify("Pi activity completed", "Pi activity completed", false);
+
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toMatchObject({ method: "notification.show", params: { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" } });
+  expect(requests[1]).toMatchObject({ method: "notification.show", params: { title: "Pi activity completed", body: "Pi activity completed", sound: "done" } });
+  expect(lanes).toEqual(["actionable", "replaceable"]);
 });

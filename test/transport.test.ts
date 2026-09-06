@@ -311,6 +311,219 @@ describe("transport module: queue and deadline behavior", () => {
 		await queue.close();
 	});
 
+	test("actionable admission evicts a deadline-bearing replaceable item and frees its key", async () => {
+		const queue = new BoundedSocketQueue(2);
+		const started: string[] = [];
+		let activeAborted = false;
+		let releaseActive!: () => void;
+		let activeStarted!: () => void;
+		let releaseLifecycle!: () => void;
+		let lifecycleStarted!: () => void;
+		const activeReady = new Promise<void>((resolve) => {
+			activeStarted = resolve;
+		});
+		const lifecycleReady = new Promise<void>((resolve) => {
+			lifecycleStarted = resolve;
+		});
+		const active = queue.enqueue(async (signal) => {
+			started.push("active");
+			signal.addEventListener("abort", () => {
+				activeAborted = true;
+			});
+			activeStarted();
+			await new Promise<void>((resolve) => {
+				releaseActive = resolve;
+			});
+			return "active";
+		}, "workspace-pane-list", false, undefined, undefined, "protected");
+		await activeReady;
+		const metadata = queue.enqueue(
+			async () => "metadata",
+			"metadata",
+			false,
+			Date.now() + 20,
+			undefined,
+			"replaceable",
+		);
+		const lifecycle = queue.enqueue(async () => {
+			started.push("lifecycle");
+			lifecycleStarted();
+			await new Promise<void>((resolve) => {
+				releaseLifecycle = resolve;
+			});
+			return "lifecycle";
+		}, "lifecycle", false, undefined, undefined, "protected");
+		const notification = queue.enqueue(async () => {
+			started.push("notification");
+			return "notification";
+		}, "notification", false, undefined, ["workspace-pane-list"], "actionable");
+
+		await expect(metadata).rejects.toThrow("actionable notification");
+		expect(activeAborted).toBe(false);
+		expect(started).toEqual(["active"]);
+		releaseActive();
+		await lifecycleReady;
+		// The evicted deadline-bearing item must not retain its key or let its
+		// former timer affect a later request that reuses the key in another lane.
+		const reused = queue.enqueue(async () => {
+			started.push("reused");
+			return "reused";
+		}, "metadata", false, undefined, undefined, "protected");
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(started).toEqual(["active", "lifecycle"]);
+		releaseLifecycle();
+		await expect(active).resolves.toBe("active");
+		await expect(lifecycle).resolves.toBe("lifecycle");
+		await expect(notification).resolves.toBe("notification");
+		await expect(reused).resolves.toBe("reused");
+		expect(started).toEqual(["active", "lifecycle", "notification", "reused"]);
+		await queue.close();
+	});
+
+	test("rejects cross-lane same-key coalescing without replacing protected or actionable work", async () => {
+		for (const { existingLane, incomingLane } of [
+			{ existingLane: "protected", incomingLane: "actionable" },
+			{ existingLane: "actionable", incomingLane: "replaceable" },
+		] as const) {
+			const queue = new BoundedSocketQueue(2);
+			const started: string[] = [];
+			let releaseActive!: () => void;
+			let activeStarted!: () => void;
+			const activeReady = new Promise<void>((resolve) => {
+				activeStarted = resolve;
+			});
+			const active = queue.enqueue(async () => {
+				started.push("active");
+				activeStarted();
+				await new Promise<void>((resolve) => {
+					releaseActive = resolve;
+				});
+				return "active";
+			});
+			await activeReady;
+			const protectedWork = queue.enqueue(async () => {
+				started.push("existing");
+				return "existing";
+			}, "shared", false, undefined, undefined, existingLane);
+			const collision = queue.enqueue(async () => {
+				started.push("collision");
+				return "collision";
+			}, "shared", false, undefined, undefined, incomingLane);
+
+			await expect(collision).rejects.toThrow("key lane conflict");
+			releaseActive();
+			await expect(active).resolves.toBe("active");
+			await expect(protectedWork).resolves.toBe("existing");
+			expect(started).toEqual(["active", "existing"]);
+			await queue.close();
+		}
+	});
+
+	test("rejects protected preemption targets without cancelling earlier replaceable observers", async () => {
+		const queue = new BoundedSocketQueue(2);
+		const started: string[] = [];
+		let observerAborted = false;
+		let releaseObserver!: () => void;
+		let observerStarted!: () => void;
+		const observerReady = new Promise<void>((resolve) => {
+			observerStarted = resolve;
+		});
+		const observer = queue.enqueue(async (signal) => {
+			started.push("observer");
+			signal.addEventListener("abort", () => {
+				observerAborted = true;
+			});
+			observerStarted();
+			await new Promise<void>((resolve) => {
+				releaseObserver = resolve;
+			});
+			return "observer";
+		}, "workspace-pane-list", false, undefined, undefined, "replaceable");
+		await observerReady;
+		const protectedWork = queue.enqueue(async () => {
+			started.push("protected");
+			return "protected";
+		}, "session", false, undefined, undefined, "protected");
+		const rejected = queue.enqueue(
+			async () => "state",
+			"state",
+			false,
+			undefined,
+			["workspace-pane-list", "session"],
+			"protected",
+		);
+
+		await expect(rejected).rejects.toThrow("preemption target lane conflict");
+		expect(observerAborted).toBe(false);
+		expect(started).toEqual(["observer"]);
+		releaseObserver();
+		await expect(observer).resolves.toBe("observer");
+		await expect(protectedWork).resolves.toBe("protected");
+		expect(started).toEqual(["observer", "protected"]);
+		await queue.close();
+	});
+
+	test("rejects active cross-lane same-key work without replacing it", async () => {
+		const queue = new BoundedSocketQueue(1);
+		const started: string[] = [];
+		let releaseActive!: () => void;
+		let activeStarted!: () => void;
+		const activeReady = new Promise<void>((resolve) => {
+			activeStarted = resolve;
+		});
+		const active = queue.enqueue(async () => {
+			started.push("active");
+			activeStarted();
+			await new Promise<void>((resolve) => {
+				releaseActive = resolve;
+			});
+			return "active";
+		}, "shared", false, undefined, undefined, "protected");
+		await activeReady;
+
+		const collision = queue.enqueue(
+			async () => "collision",
+			"shared",
+			false,
+			undefined,
+			undefined,
+			"replaceable",
+		);
+
+		await expect(collision).rejects.toThrow("key lane conflict");
+		releaseActive();
+		await expect(active).resolves.toBe("active");
+		expect(started).toEqual(["active"]);
+		await queue.close();
+	});
+
+	test("does not evict protected or actionable queued work for an actionable notification", async () => {
+		const queue = new BoundedSocketQueue(2);
+		let releaseActive!: () => void;
+		let activeStarted!: () => void;
+		const activeReady = new Promise<void>((resolve) => {
+			activeStarted = resolve;
+		});
+		const active = queue.enqueue(async () => {
+			activeStarted();
+			await new Promise<void>((resolve) => {
+				releaseActive = resolve;
+			});
+			return "active";
+		}, "active", false, undefined, undefined, "protected");
+		await activeReady;
+		const lifecycle = queue.enqueue(async () => "lifecycle", "lifecycle", false, undefined, undefined, "protected");
+		const firstNotification = queue.enqueue(async () => "first", "first", false, undefined, undefined, "actionable");
+		const secondNotification = queue.enqueue(async () => "second", "second", false, undefined, undefined, "actionable");
+
+		await expect(secondNotification).rejects.toThrow("queue is full");
+		releaseActive();
+		await expect(active).resolves.toBe("active");
+		await expect(lifecycle).resolves.toBe("lifecycle");
+		await expect(firstNotification).resolves.toBe("first");
+		await queue.close();
+	});
+
 	test("times out active work and dispatches the next FIFO item", async () => {
 		const queue = new BoundedSocketQueue(2);
 		const started: string[] = [];
@@ -411,7 +624,7 @@ describe("transport module: queue and deadline behavior", () => {
 		await queue.close();
 	});
 
-	test("atomically reserves preempting work ahead of later observers", async () => {
+	test("allows protected work to preempt replaceable workspace observers", async () => {
 		const queue = new BoundedSocketQueue(3);
 		const started: string[] = [];
 		let startedObserver!: () => void;
@@ -430,6 +643,10 @@ describe("transport module: queue and deadline behavior", () => {
 					}, { once: true });
 				}),
 			"workspace-pane-list",
+			false,
+			undefined,
+			undefined,
+			"replaceable",
 		);
 		await observerReady;
 
@@ -442,6 +659,7 @@ describe("transport module: queue and deadline behavior", () => {
 			false,
 			undefined,
 			["workspace-pane-list", "workspace-main-summary"],
+			"protected",
 		);
 		const laterObserver = queue.enqueue(async () => {
 			started.push("later-observer");
