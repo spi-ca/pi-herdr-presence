@@ -387,6 +387,20 @@ serial(
 		}),
 );
 serial(
+	"an input-suppressed failure leaves its delayed failed terminal independently eligible",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			const interaction = producer("interaction");
+			const subagent = producer("subagent");
+			interaction.publishState(input(1));
+			subagent.publishState(failure(1));
+			await sleep(20);
+			subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+		}),
+);
+serial(
 	"a retained failure already notified before a native prompt keeps its separate input alert",
 	async () =>
 		withRuntime({}, async ({ runtime, producer, requests }) => {
