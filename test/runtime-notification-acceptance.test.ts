@@ -19,7 +19,7 @@ async function eventually(assertion: () => void): Promise<void> {
   throw failure;
 }
 
-test("live metadata is queued before a best-effort toast behind an active agent report", async () => {
+test("deduped idle metadata leaves a saturated live projection best-effort behind an active agent report", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-v2-live-order-"));
   const socketPath = join(directory, "socket");
   const requests: Request[] = [];
@@ -59,10 +59,11 @@ test("live metadata is queued before a best-effort toast behind an active agent 
     producer!.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting" });
     producer!.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
     await reportStartedPromise;
-    // maxQueue=1 keeps metadata behind the active agent report; the terminal
-    // toast is intentionally best-effort and therefore loses the saturated race.
+    // The acknowledged idle projection was semantically suppressed, so this
+    // one-slot queue has no old metadata entry to replace. The changed live
+    // projection and terminal toast are both best-effort under saturation.
     releaseReport();
-    await eventually(() => expect(requests.map(request => request.method)).toEqual(["pane.report_agent", "pane.report_metadata"]));
+    await eventually(() => expect(requests.map(request => request.method)).toEqual(["pane.report_agent"]));
     expect(requests.some(request => request.method === "notification.show")).toBe(false);
   } finally {
     releaseReport?.();

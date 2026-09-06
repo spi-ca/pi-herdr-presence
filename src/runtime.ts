@@ -213,6 +213,7 @@ export class PresenceRuntime {
   }
 
   async startSession(context: unknown, event?: unknown) {
+    const deadlineAt = this.lifecycleDeadline();
     // A replacement must release the managed integration's counter and fence
     // ordinary client output synchronously, before teardown/probing can await.
     this.releaseCompanionBlocked();
@@ -230,7 +231,55 @@ export class PresenceRuntime {
     this.pendingLifecycle = (context as { mode?: unknown })?.mode === "tui" && current
       ? { epoch, id: current.id, manager: current.manager, context: context as ContextUsageProvider, edges: [], overflow: false, nativePromptWaiting: false }
       : null;
-    return this.queueStartup(() => this.beginSession(context, event, epoch, current));
+    return this.settleByDeadline(
+      this.queueStartup(() => this.beginSession(context, event, epoch, current, deadlineAt)),
+      deadlineAt,
+      () => this.abandonStartup(epoch),
+    );
+  }
+
+  /** One lifecycle entry owns one wall-clock budget across authority and socket work. */
+  private lifecycleDeadline(): number {
+    const now = Date.now();
+    return Number.isFinite(now) ? now + this.config.timeoutMs : 0;
+  }
+  private remaining(deadlineAt: number): number {
+    const value = deadlineAt - Date.now();
+    return Number.isFinite(value) ? Math.max(0, value) : 0;
+  }
+  private expired(deadlineAt: number): boolean { return this.remaining(deadlineAt) <= 0; }
+  /** Reserve one quarter (at most 250 ms) of a lifecycle for priority rollback. */
+  private startupWorkDeadline(deadlineAt: number): number {
+    const reserve = Math.min(250, Math.max(1, Math.floor(this.config.timeoutMs / 4)));
+    return deadlineAt - reserve;
+  }
+  /** The queued work remains serialized after the caller budget expires. */
+  private async settleByDeadline(work: Promise<void>, deadlineAt: number, onExpiry?: () => void): Promise<void> {
+    const remaining = this.remaining(deadlineAt);
+    if (remaining <= 0) { onExpiry?.(); return; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
+    try {
+      await Promise.race([work.catch(() => {}), new Promise<void>((resolve) => {
+        timer = setTimeout(() => { expired = true; resolve(); }, remaining);
+        timer.unref?.();
+      })]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (expired) onExpiry?.();
+    }
+  }
+
+  private async statusBeforeDeadline(deadlineAt: number) {
+    const remaining = this.remaining(deadlineAt);
+    if (remaining <= 0) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([officialHookStatus(), new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), remaining);
+        timer.unref?.();
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   private transition(work: () => Promise<void>): Promise<void> {
@@ -261,17 +310,22 @@ export class PresenceRuntime {
     }
   }
 
-  private async beginSession(context: unknown, event: unknown, epoch: number, current: RuntimeSession | null) {
-    await this.teardown();
-    if (epoch !== this.epoch) return;
+  private async beginSession(context: unknown, event: unknown, epoch: number, current: RuntimeSession | null, deadlineAt: number) {
+    const startupDeadlineAt = this.startupWorkDeadline(deadlineAt);
+    await this.teardown(deadlineAt);
+    if (epoch !== this.epoch || this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); return; }
     if ((context as { mode?: unknown })?.mode !== "tui") { this.abandonStartup(epoch); return; }
     const identity = readHerdrIdentity();
     // Use the session_start snapshot, not a potentially mutated manager read
     // after asynchronous authority probing.
     if (!identity || !current) { this.abandonStartup(epoch); return; }
     let mode: PresenceMode = "disabled";
-    try { mode = resolvePresenceMode(this.config, await officialHookStatus()); } catch {}
-    if (epoch !== this.epoch) return;
+    try {
+      const status = await this.statusBeforeDeadline(startupDeadlineAt);
+      if (status === undefined) { this.abandonStartup(epoch); return; }
+      mode = resolvePresenceMode(this.config, status);
+    } catch {}
+    if (epoch !== this.epoch || this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); return; }
     if (mode === "disabled") { this.abandonStartup(epoch); return; }
     let client: PresenceClient;
     let consumer: ReturnType<typeof createPresenceConsumer>;
@@ -354,14 +408,16 @@ export class PresenceRuntime {
     try {
       // Standalone clears current/legacy ownership before restoring authority;
       // companion clears only its separately-owned presentation/token projection.
-      await client.prepareSessionAuthority();
-      if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
-      if (mode === "standalone") await client.reportSession(current.ref, typeof (event as { reason?: unknown })?.reason === "string" ? (event as { reason: string }).reason : undefined);
+      await client.prepareSessionAuthority(startupDeadlineAt);
+      if (epoch !== this.epoch || this.client !== client || !this.consumerActive) { this.abandonStartup(epoch); return; }
+      if (this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); await this.teardown(deadlineAt); return; }
+      if (mode === "standalone") await client.reportSession(current.ref, typeof (event as { reason?: unknown })?.reason === "string" ? (event as { reason: string }).reason : undefined, startupDeadlineAt);
     } catch {
       // Lifecycle output is observer-only; buffered retained state still gets
       // one quiet render after bounded cleanup and session attempts settle.
     }
-    if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+    if (epoch !== this.epoch || this.client !== client || !this.consumerActive) { this.abandonStartup(epoch); return; }
+    if (this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); await this.teardown(deadlineAt); return; }
 
     // Retained replay only reconstructs state. Keep public output closed while
     // the internal startup path awaits report + metadata, so live ingress cannot
@@ -372,8 +428,9 @@ export class PresenceRuntime {
       // Clear immediately before every await: ingress during that pass requires
       // another complete snapshot, while the public output gate remains closed.
       this.initialProjectionDirty = false;
-      await this.renderCurrent(true);
-      if (epoch !== this.epoch || this.client !== client || !this.consumerActive) return;
+      await this.renderCurrent(true, startupDeadlineAt);
+      if (epoch !== this.epoch || this.client !== client || !this.consumerActive) { this.abandonStartup(epoch); return; }
+      if (this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); await this.teardown(deadlineAt); return; }
       if (!this.initialProjectionDirty) { stabilized = true; break; }
     }
     if (!stabilized) {
@@ -382,9 +439,10 @@ export class PresenceRuntime {
       this.ingressEpoch = null;
       this.outputReady = false;
       this.discardPendingLifecycle(epoch);
-      await this.teardown();
+      await this.teardown(deadlineAt);
       return;
     }
+    if (this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); await this.teardown(deadlineAt); return; }
     // No await may separate the clean-pass check from this release.
     this.outputReady = true;
     this.initialProjectionInFlight = false;
@@ -782,6 +840,7 @@ export class PresenceRuntime {
   }
 
   async shutdownSession(context: object) {
+    const deadlineAt = this.lifecycleDeadline();
     // An unfenced shutdown could tear down a replacement session. Unlike
     // ordinary callbacks, /fork may mutate the legitimate owner's ID before
     // Pi emits shutdown, so this fence intentionally checks manager + epoch.
@@ -801,7 +860,8 @@ export class PresenceRuntime {
     // Reserve this teardown synchronously. A cache-busted replacement can queue
     // startup immediately afterwards, but cannot acquire authority before this
     // client's bounded remote cleanup has completed.
-    return processCoordinator.enqueueAuthority(() => this.transition(() => this.teardown()));
+    const cleanup = processCoordinator.enqueueAuthority(() => this.transition(() => this.teardown(deadlineAt)));
+    return this.settleByDeadline(cleanup, deadlineAt);
   }
 
   private publish(state: "idle" | "running") {
@@ -925,7 +985,7 @@ export class PresenceRuntime {
   }
 
   /** The startup projection is awaited so agent, metadata, then notifications stay ordered. */
-  private async renderCurrent(startup = false) {
+  private async renderCurrent(startup = false, deadlineAt?: number) {
     const ref = this.sessionRef;
     const client = this.client;
     const internalStartupOutput = startup && this.initialProjectionInFlight && this.isIngressOpen() && this.rootSession && this.consumerActive;
@@ -934,10 +994,10 @@ export class PresenceRuntime {
     const nativePromptWaiting = this.nativePromptWaiting();
     const state = compositeState(events, this.active, nativePromptWaiting);
     const terminals = this.currentTerminalBatch();
-    if (this.mode === "standalone") await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active, nativePromptWaiting));
+    if (this.mode === "standalone") await client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active, nativePromptWaiting), deadlineAt);
     const tokens = metadata(events, terminals, this.usage.snapshot(), this.active, state, this.latestTerminalOutcome(), nativePromptWaiting);
     this.workspaceLease.update(tokens.summary);
-    await client.metadata(presentation(), tokens);
+    await client.metadata(presentation(), tokens, deadlineAt);
   }
 
   private render(attention?: PresenceStateV2) {
@@ -1270,7 +1330,7 @@ export class PresenceRuntime {
     this.clearFailureArrivals();
   }
 
-  private async teardown() {
+  private async teardown(deadlineAt?: number) {
     // Detach the remote handle before local cleanup. An unowned activation
     // failure calls teardownLocal directly and therefore never reaches socket output.
     const client = this.client;
@@ -1281,9 +1341,20 @@ export class PresenceRuntime {
     this.mode = "disabled";
     this.teardownLocal();
     if (!client) return;
-    if (mode === "companion") { await client.teardown(this.config.timeoutMs).catch(() => {}); return; }
+    const teardownClient = async () => {
+      if (deadlineAt === undefined) { await client.teardown(this.config.timeoutMs).catch(() => {}); return; }
+      // The fallback retains test-double compatibility; real clients always receive
+      // the original absolute deadline rather than a refreshed stage timeout.
+      const absolute = (client as PresenceClient & { teardownUntil?: (deadline: number) => Promise<void> }).teardownUntil;
+      if (absolute) await absolute.call(client, deadlineAt).catch(() => {});
+      else await client.teardown(this.remaining(deadlineAt)).catch(() => {});
+    };
+    if (mode === "companion") {
+      await teardownClient();
+      return;
+    }
     if (authorityGeneration !== null && processCoordinator.isAuthority(authorityGeneration)) {
-      await client.teardown(this.config.timeoutMs).catch(() => {});
+      await teardownClient();
       processCoordinator.releaseAuthority(authorityGeneration);
     } else await client.close(0).catch(() => {});
   }

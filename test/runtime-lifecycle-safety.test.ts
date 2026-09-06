@@ -6,8 +6,9 @@ import { createPresenceConsumer, createPresenceProducer, EVENT_NAMES, MAX_INTEGE
 import { resolvePresenceConfig } from "../src/config.js";
 import { registerPresenceHooks } from "../src/hooks.js";
 import { PresenceRuntime } from "../src/runtime.js";
+import { processCoordinator } from "../src/process-coordinator.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
-import { expectExactLegacyMetadataClear, expectExactMetadataClear, expectExactMetadataIngress } from "./fixtures/metadata-ingress.js";
+import { expectExactCompanionMetadataIngress, expectExactLegacyMetadataClear, expectExactMetadataClear, expectExactMetadataIngress } from "./fixtures/metadata-ingress.js";
 
 type Listener = (payload: unknown) => void;
 type LifecycleListener = (event: unknown, context: unknown) => unknown;
@@ -142,6 +143,10 @@ test("native-only prompts project fixed working-to-blocked-to-working-to-idle st
     bus.hooks.get("ui_prompt_start")?.[0]?.({ title: "private prompt", content: "secret answer" }, context);
     await pause();
     expect(reports().at(-1)).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+    const nativeMetadata = requests.find(request => request.method === "pane.report_metadata" && (request.params.tokens as Record<string, unknown>).summary === "input");
+    expect(nativeMetadata).toBeDefined();
+    expectExactMetadataIngress(nativeMetadata!.params);
+    expect(nativeMetadata!.params.tokens).toMatchObject({ summary: "input", v2_attention: null, v2_interaction: null });
     expect(JSON.stringify(requests)).not.toContain("private prompt");
     expect(JSON.stringify(requests)).not.toContain("secret answer");
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
@@ -211,9 +216,14 @@ test("companion balances native prompt leases across replacement and shutdown", 
   const bus = makeBus();
   const blocked: Array<{ active: boolean; label?: string }> = [];
   bus.events.on("herdr:blocked", payload => blocked.push(payload as { active: boolean; label?: string }));
-  await withRuntime(async (runtime) => {
+  await withRuntime(async (runtime, _bus, requests) => {
     const first = activeContext(runtime);
     runtime.handleUiPromptStart(first);
+    await pause();
+    const nativeMetadata = requests.find(request => request.method === "pane.report_metadata" && request.params.source === "herdr:pi-presence" && (request.params.tokens as Record<string, unknown>).summary === "input");
+    expect(nativeMetadata).toBeDefined();
+    expectExactCompanionMetadataIngress(nativeMetadata!.params);
+    expect(nativeMetadata!.params.tokens).toMatchObject({ summary: "input", v2_attention: null, v2_interaction: null });
     expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }]);
 
     const replacement = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
@@ -941,10 +951,79 @@ test("shutdown requires a fenced context and cleans up through a fresh valid wra
 
     const manager = internal(runtime).sessionManager;
     await runtime.shutdownSession({ sessionManager: manager ?? undefined });
-    expect(calls).toEqual([timeoutMs]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBeGreaterThanOrEqual(0);
+    expect(calls[0]).toBeLessThanOrEqual(timeoutMs);
     expect(internal(runtime).rootSession).toBe(false);
     expect(internal(runtime).consumer).toBeNull();
   }, { ...resolvePresenceConfig(), soleReporter: true, timeoutMs });
+});
+
+test("lifecycle deadlines include authority waiting while queued cleanup remains ahead of replacement", async () => {
+  await withRuntime(async (runtime, _bus, requests) => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const blocker = processCoordinator.enqueueAuthority(async () => await gate);
+    await Promise.resolve();
+    try {
+      const before = requests.length;
+      const stopping = runtime.shutdownSession(activeContext(runtime));
+      await expect(Promise.race([
+        stopping.then(() => "settled"),
+        pause(200).then(() => "late"),
+      ])).resolves.toBe("settled");
+      // The caller has settled, but only the reserved authority work may retire ownership.
+      expect(internal(runtime).rootSession).toBe(true);
+
+      const replacementContext = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
+      const replacement = runtime.startSession(replacementContext);
+      const runner = (runtime as unknown as { startupRunner: Promise<void> | null }).startupRunner;
+      // The replacement cannot pass the cleanup reservation while authority is held.
+      await pause(120);
+      expect(requests.slice(before).some(request => request.params.agent_session_id === "replacement")).toBe(false);
+      // Expiry while waiting for process authority abandons this exact detached
+      // lifecycle, so later hooks retain neither callback context nor edges.
+      expect(internal(runtime).pendingLifecycle).toBeNull();
+      runtime.handleAgentStart(replacementContext);
+      expect(internal(runtime).pendingLifecycle).toBeNull();
+      release();
+      await blocker;
+      await replacement;
+      await runner;
+      // Its budget expired while queued, so it safely closes without new remote work.
+      expect(requests.slice(before).some(request => request.params.agent_session_id === "replacement")).toBe(false);
+      expect(internal(runtime).rootSession).toBe(false);
+    } finally { release(); }
+  }, { ...resolvePresenceConfig(), soleReporter: true, timeoutMs: 100 });
+});
+
+test("session_shutdown returns host-awaited best-effort cleanup", async () => {
+  const bus = makeBus();
+  let resolveCleanup!: () => void;
+  let rejectCleanup!: (reason?: unknown) => void;
+  const cleanup = new Promise<void>(resolve => { resolveCleanup = resolve; });
+  const rejectedCleanup = new Promise<void>((_resolve, reject) => { rejectCleanup = reject; });
+  let calls = 0;
+  const runtime = {
+    shutdownSession() { return ++calls === 1 ? cleanup : rejectedCleanup; },
+  } as unknown as PresenceRuntime;
+  registerPresenceHooks(bus as never, runtime);
+  const shutdown = bus.hooks.get("session_shutdown")?.[0];
+  if (!shutdown) throw new Error("missing shutdown hook");
+
+  const returned = shutdown({ type: "session_shutdown" }, {});
+  expect(typeof (returned as Promise<unknown>).then).toBe("function");
+  let settled = false;
+  void (returned as Promise<void>).then(() => { settled = true; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  resolveCleanup();
+  await returned;
+  expect(settled).toBe(true);
+
+  const rejected = shutdown({ type: "session_shutdown" }, {});
+  rejectCleanup(new Error("cleanup failure"));
+  await expect(rejected).resolves.toBeUndefined();
 });
 
 test("V2 event names retain only the consumer-ready receipt channel", () => {
@@ -957,7 +1036,7 @@ test("V2 event names retain only the consumer-ready receipt channel", () => {
   });
 });
 
-test("detached lifecycle hooks retain immediate agent edges while startup socket work stalls", async () => {
+test("detached startup hooks retain immediate agent edges while startup socket work stalls", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-detached-hooks-"));
   const socket = join(directory, "socket");
   const server = await fakeSocket(socket, async () => await new Promise<string>(() => {}));
@@ -983,17 +1062,17 @@ test("detached lifecycle hooks retain immediate agent edges while startup socket
     expect(agentStart({ type: "agent_start" }, context)).toBeUndefined();
     expect(bus.hooks.get("message_end")?.[0]?.({ type: "message_end", message: { role: "assistant", usage: { totalTokens: 7 } } }, context)).toBeUndefined();
     await pause(160);
-    // The bounded derived-edge queue retains start → turn → tool → end →
-    // settled → start → message, rather than compressing it into booleans.
-    expect(internal(runtime).active).toBe(true);
-    expect(internal(runtime).lastPiState).toMatchObject({ state: "running" });
-    expect(internal(runtime).terminalRecords).toHaveLength(1);
-    expect(internal(runtime).terminalRecords[0]).toMatchObject({ outcome: "failed" });
-    expect(internal(runtime).usage.snapshot()).toMatchObject({ tokens: 7 });
-    expect(shutdown({ type: "session_shutdown" }, context)).toBeUndefined();
-    // Shutdown invalidates ownership before its detached best-effort cleanup settles.
-    agentStart({ type: "agent_start" }, context);
-    expect(internal(runtime).active).toBe(true);
+    // The aggregate startup deadline fences retained edges when the initial
+    // socket operation cannot settle; no delayed lifecycle projection survives.
+    expect(internal(runtime).active).toBe(false);
+    expect(internal(runtime).rootSession).toBe(false);
+    expect(internal(runtime).lastPiState).toBeNull();
+    expect(internal(runtime).terminalRecords).toHaveLength(0);
+    const shutdownCleanup = shutdown({ type: "session_shutdown" }, context);
+    expect(typeof (shutdownCleanup as Promise<unknown>).then).toBe("function");
+    await shutdownCleanup;
+    // Pi awaits bounded best-effort cleanup, so teardown completes before this returns.
+    expect(internal(runtime).active).toBe(false);
   } finally {
     await runtime.shutdownSession((runtime as unknown as { context: object }).context);
     restore(saved);

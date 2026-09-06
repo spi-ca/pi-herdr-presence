@@ -92,6 +92,50 @@ serial("a live edge during the stalled initial report gets latest metadata befor
   }
 });
 
+serial("an acknowledged session authority is priority-cleared after startup projection expiry", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-authority-rollback-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let markProjection!: () => void;
+  let markAuthorityClear!: () => void;
+  const projectionSeen = new Promise<void>(resolve => { markProjection = resolve; });
+  const authorityClearSeen = new Promise<void>(resolve => { markAuthorityClear = resolve; });
+  const server = await fakeSocket(socket, line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.report_agent") { markProjection(); return undefined; }
+    if (request.method === "pane.clear_agent_authority") markAuthorityClear();
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, timeoutMs: 200, finalClearMs: 1_000 });
+  const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession(context);
+    await projectionSeen;
+    await starting;
+    await Promise.race([
+      authorityClearSeen,
+      pause(1_000).then(() => { throw new Error("acknowledged authority was not cleared after startup expiry"); }),
+    ]);
+
+    const sessionIndex = requests.findIndex(request => request.method === "pane.report_agent_session");
+    const projectionIndex = requests.findIndex(request => request.method === "pane.report_agent");
+    const clearIndex = requests.findIndex(request => request.method === "pane.clear_agent_authority");
+    expect(sessionIndex).toBeGreaterThan(-1);
+    expect(projectionIndex).toBeGreaterThan(sessionIndex);
+    expect(clearIndex).toBeGreaterThan(projectionIndex);
+  } finally {
+    await runtime.shutdownSession(context);
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 serial("a pending native prompt is adopted after delayed TUI startup with one fixed notification", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-native-prompt-startup-"));
   const socket = join(directory, "socket");
@@ -319,9 +363,9 @@ serial("startup projections reach a fixed point before terminal retention and no
     await starting;
     await pause();
 
-    // Initial, first catch-up, and terminal catch-up projections are distinct;
-    // the final local idle publication occurs only after startup stabilization.
-    expect(reports).toBe(4);
+    // Semantic report dedupe retains the changed initial/blocked projections;
+    // the terminal-only and final-idle passes do not resend unchanged agent state.
+    expect(reports).toBe(2);
     const terminalMetadataIndex = requests.findIndex(request => request.method === "pane.report_metadata"
       && (request.params.tokens as Record<string, string | null>).v2_terminals === "subagent:1:1:completed");
     const notificationIndex = requests.findIndex(request => request.method === "notification.show" && request.params.title === "Pi activity completed");
@@ -338,7 +382,7 @@ serial("startup projections reach a fixed point before terminal retention and no
   }
 });
 
-serial("an unstable startup projection tears down without releasing notifications", async () => {
+serial("unchanged startup projections are suppressed before they can cause fixed-point churn", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-unstable-"));
   const socket = join(directory, "socket");
   const requests: Request[] = [];
@@ -363,10 +407,12 @@ serial("an unstable startup projection tears down without releasing notification
     registerPresenceHooks(bus as never, runtime);
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
 
-    expect(projections).toBe(16);
-    expect((runtime as unknown as { rootSession: boolean; consumer: unknown; outputReady: boolean }).rootSession).toBe(false);
-    expect((runtime as unknown as { rootSession: boolean; consumer: unknown; outputReady: boolean }).consumer).toBeNull();
-    expect((runtime as unknown as { rootSession: boolean; consumer: unknown; outputReady: boolean }).outputReady).toBe(false);
+    // Each fixed-point pass is still evaluated, but identical wire projections
+    // are acknowledged once and then suppressed by the ordinary report cache.
+    expect(projections).toBe(2);
+    expect((runtime as unknown as { rootSession: boolean; consumer: unknown; outputReady: boolean }).rootSession).toBe(true);
+    expect((runtime as unknown as { rootSession: boolean; consumer: unknown; outputReady: boolean }).consumer).not.toBeNull();
+    expect((runtime as unknown as { rootSession: boolean; consumer: unknown; outputReady: boolean }).outputReady).toBe(true);
     expect(requests.some(request => request.method === "notification.show")).toBe(false);
   } finally {
     producer?.deactivate();

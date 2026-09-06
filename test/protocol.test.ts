@@ -63,6 +63,24 @@ test("strictly encodes known Herdr methods and response envelopes",()=>{
  expect(()=>decodeHerdrResponse('{"id":"wrong","result":{}}',"a")).toThrow();
 });
 
+test("accepts native input summaries without V2 interaction tokens in standalone and companion envelopes", () => {
+ const tokens = { ...nullMetadataTokens, summary: "input" };
+ const standalone = { ...metadataParams, title: "Pi · input", tokens };
+ const companion = { pane_id:"p", source:"herdr:pi-presence", applies_to_source:"herdr:pi", seq:1, title:"Pi · input", display_agent:"Pi", state_labels:metadataParams.state_labels, tokens };
+ expect(isExactMetadataIngressParams(standalone)).toBe(true);
+ expect(isExactCompanionMetadataParams(companion)).toBe(true);
+ expect(encodeHerdrRequest({ id:"native-input", method:"pane.report_metadata", params:standalone })).toContain('"summary":"input"');
+});
+
+test("accepts stopping summaries only when they match a positive cancelling aggregate", () => {
+ const tokens = { ...nullMetadataTokens, summary: "working · stopping 2", v2_subagents: "0,2,0,0,0,0,0" };
+ const params = { ...metadataParams, title: "Pi · working · stopping 2", tokens };
+ expect(isExactMetadataIngressParams(params)).toBe(true);
+ expect(isExactMetadataIngressParams({ ...params, title: "Pi · working · stopping 3", tokens: { ...tokens, summary: "working · stopping 3" } })).toBe(false);
+ expect(isExactMetadataIngressParams({ ...params, title: "Pi · working · stopping 0", tokens: { ...tokens, summary: "working · stopping 0" } })).toBe(false);
+ expect(isExactMetadataIngressParams({ ...params, tokens: { ...tokens, v2_subagents: null } })).toBe(false);
+});
+
 test("accepts only canonical compact grammars for populated metadata tokens", () => {
  const populated = {
   ...metadataParams,

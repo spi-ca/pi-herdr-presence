@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Lifecycle start and shutdown now use one absolute configured timeout across authority-lane waiting and remote stages. Shutdown returns to Pi by that deadline while its reserved serialized cleanup later closes/releases ownership; expired startup and cleanup paths fence without new remote work.
+- Ordinary acknowledged `pane.report_agent` and `pane.report_metadata` projections now deduplicate complete wire semantics per client (excluding request IDs and sequence). Failed, malformed, stale, notification, session, workspace, and cleanup work remains retryable/live.
+
 - Companion mode now bridges aggregate accepted V2 `ask_user` waiting state through one balanced, fixed-label `herdr:blocked` lease. Retained replay acquires it, withdrawal releases it, and replacement or shutdown synchronously balances it while the managed `herdr:pi` integration remains the sole lifecycle reporter.
 - Workspace heartbeat pacing now lives in `src/workspace-summary.ts`: each next 10-second attempt is scheduled after the prior publication completes, attempts do not overlap, and replacement/teardown fence pending or in-flight work without clearing the 30-second workspace lease.
 - CI now runs Bun coverage through `scripts/check-coverage.ts`, requiring at least 85% function and 90% line coverage. The real-Herdr V2 producer harness moved to `scripts/live-herdr-presence-producers.ts`; it remains manual, standalone-only, disposable-pane guarded, requires metadata, effective notifications disabled, and adequate terminal retention, and is excluded from automatic CI.

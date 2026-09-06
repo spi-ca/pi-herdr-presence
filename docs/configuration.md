@@ -22,7 +22,7 @@ All values are read from the environment. Booleans are case-insensitive after su
 | `PI_HERDR_PRESENCE_ENABLED` | `true` | Boolean | Global observer switch; false disables all active modes. |
 | `PI_HERDR_PRESENCE_MODE` | `auto` | `auto`, `standalone`, `companion`, `disabled` | Can restrict, never upgrade, the proven marker result. |
 | `PI_HERDR_PRESENCE_SOLE_REPORTER` | `false` | Boolean | Deprecated compatibility acknowledgement. It does not gate automatic standalone activation. |
-| `PI_HERDR_PRESENCE_TIMEOUT_MS` | `1000` | Integer `100`–`30000` | Normal request/response budget, split across at most two lifecycle attempts. |
+| `PI_HERDR_PRESENCE_TIMEOUT_MS` | `1000` | Integer `100`–`30000` | One absolute lifecycle budget, including authority-lane waiting and teardown. Startup work uses the earlier boundary that reserves one quarter (at most 250 ms) for rollback cleanup; any lifecycle request has at most two attempts. |
 | `PI_HERDR_PRESENCE_MAX_QUEUE` | `16` | Integer `1`–`128` | Bound for pending latest-write-wins socket entries. |
 | `PI_HERDR_PRESENCE_METADATA` | `true` | Boolean | Enables ordinary live pane metadata and the workspace lease. Owned startup/teardown cleanup still runs. |
 | `PI_HERDR_PRESENCE_FINAL_CLEAR_MS` | `1500` | Integer `0`–`60000` | Retention period before terminal metadata is quietly refreshed without its terminal batch. |

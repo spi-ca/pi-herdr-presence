@@ -83,14 +83,20 @@ function summary(events: readonly PresenceStateV2[], state: HerdrState, progress
   // newest accepted terminal arrival as a closed trailing segment.
   const terminal = state === "blocked" || stateSegment === "input" ? undefined : terminalSegment(latestTerminal);
   const parts = [stateSegment];
-  const reserve = terminal ? Buffer.byteLength(` · ${terminal}`, "utf8") : 0;
+  const pending = interactionToken?.slice("ask_user:".length);
+  // V2 input is a required summary projection, so reserve its suffix before
+  // optional aggregate segments consume the fixed 80-byte/code-point budget.
+  const terminalReserve = terminal ? Buffer.byteLength(` · ${terminal}`, "utf8") : 0;
+  const reserve = terminalReserve
+    + (pending !== undefined ? Buffer.byteLength(` · input ${pending}`, "utf8") : 0);
   if (progressToken) addSummarySegment(parts, progressToken, reserve);
   const running = aggregate && count(aggregate.running);
+  const cancelling = aggregate && count(aggregate.cancelling);
   const queued = aggregate && count(aggregate.queued);
-  const pending = interactionToken?.slice("ask_user:".length);
-  if (running !== undefined) addSummarySegment(parts, `running ${running}`, reserve);
-  if (queued !== undefined) addSummarySegment(parts, `queued ${queued}`, reserve);
-  if (pending !== undefined) addSummarySegment(parts, `input ${pending}`, reserve);
+  if (running !== undefined && running > 0) addSummarySegment(parts, `running ${running}`, reserve);
+  if (cancelling !== undefined && cancelling > 0) addSummarySegment(parts, `stopping ${cancelling}`, reserve);
+  if (queued !== undefined && queued > 0) addSummarySegment(parts, `queued ${queued}`, reserve);
+  if (pending !== undefined) addSummarySegment(parts, `input ${pending}`, terminalReserve);
   if (terminal) addSummarySegment(parts, terminal);
   return parts.join(" · ");
 }

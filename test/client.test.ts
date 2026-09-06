@@ -269,6 +269,23 @@ test("invalid sequence clocks make fire-and-forget lifecycle output fail closed 
   }
 });
 
+test("absolute lifecycle deadlines are checked before transport and passed through unchanged", async () => {
+  const deadlines: Array<number | undefined> = [];
+  const presence = client({
+    async request(line: string, _key?: string, _priority?: boolean, _timeoutMs?: number, _preempt?: readonly string[], deadlineAt?: number) {
+      deadlines.push(deadlineAt);
+      const request = JSON.parse(line) as Request;
+      return JSON.stringify({ id: request.id, result: {} });
+    },
+    cancel() {}, async close() {},
+  });
+  const deadlineAt = Date.now() + 1_000;
+  await presence.report("idle", session, undefined, deadlineAt);
+  await presence.report("working", session, undefined, Date.now() - 1);
+
+  expect(deadlines).toEqual([deadlineAt]);
+});
+
 test("lifecycle transport retries split the configured timeout across two attempts", async () => {
   const timeouts: number[] = [];
   const transport = {
@@ -301,6 +318,64 @@ test("a minimum lifecycle timeout remains one nonzero bounded attempt", async ()
   await client(transport, 1).report("working", session);
 
   expect(timeouts).toEqual([1]);
+});
+
+test("teardown prioritizes authority clear after a lost session response", async () => {
+  const requests: Request[] = [];
+  const priorities: boolean[] = [];
+  let sessionRequestSeen!: () => void;
+  const sessionRequest = new Promise<void>((resolve) => { sessionRequestSeen = resolve; });
+  const presence = client({
+    request(line: string, _key?: string, priority = false) {
+      const request = JSON.parse(line) as Request;
+      requests.push(request);
+      priorities.push(priority);
+      if (request.method === "pane.report_agent_session") {
+        sessionRequestSeen();
+        return new Promise<string>(() => {});
+      }
+      return Promise.resolve(JSON.stringify({ id: request.id, result: {} }));
+    },
+    cancel() {}, async close() {},
+  });
+
+  void presence.reportSession(session);
+  await sessionRequest;
+  await presence.teardown();
+
+  const clearIndex = requests.findIndex(request => request.method === "pane.clear_agent_authority");
+  const metadataIndex = requests.findIndex(request => request.method === "pane.report_metadata");
+  expect(clearIndex).toBe(1);
+  expect(metadataIndex).toBeGreaterThan(clearIndex);
+  expect(priorities[clearIndex]).toBe(true);
+  expectExactAgentAuthorityClear(requests[clearIndex]!.params);
+});
+
+test("teardown prioritizes authority clear after malformed session responses", async () => {
+  const requests: Request[] = [];
+  const priorities: boolean[] = [];
+  const presence = client({
+    async request(line: string, _key?: string, priority = false) {
+      const request = JSON.parse(line) as Request;
+      requests.push(request);
+      priorities.push(priority);
+      return request.method === "pane.report_agent_session"
+        ? "malformed response"
+        : JSON.stringify({ id: request.id, result: {} });
+    },
+    cancel() {}, async close() {},
+  });
+
+  await presence.reportSession(session);
+  await presence.teardown();
+
+  const clearIndex = requests.findIndex(request => request.method === "pane.clear_agent_authority");
+  const metadataIndex = requests.findIndex(request => request.method === "pane.report_metadata");
+  expect(requests.filter(request => request.method === "pane.report_agent_session")).toHaveLength(2);
+  expect(clearIndex).toBe(2);
+  expect(metadataIndex).toBeGreaterThan(clearIndex);
+  expect(priorities[clearIndex]).toBe(true);
+  expectExactAgentAuthorityClear(requests[clearIndex]!.params);
 });
 
 test("teardown clears authority once after metadata cleanup and closes within its aggregate deadline", async () => {
@@ -441,6 +516,87 @@ test("a failed stale keyed agent attempt cannot retry over the latest state", as
   await queue.close();
 });
 
+
+test("ordinary reports and metadata cache only acknowledged wire-equivalent projections", async () => {
+  const fake = recordingTransport();
+  const presence = client(fake.transport);
+
+  await presence.report("working", session, "Pi is working");
+  await presence.report("working", session, "Pi is working");
+  await presence.metadata(presentation(), idleTokens);
+  await presence.metadata(presentation(), { ...idleTokens, summary: "working" });
+  await presence.metadata(presentation(), { ...idleTokens, summary: "working" });
+
+  expect(fake.requests.filter(request => request.method === "pane.report_agent")).toHaveLength(1);
+  // Startup cleanup remains live; the two distinct metadata projections do not.
+  expect(fake.requests.filter(request => request.method === "pane.report_metadata")).toHaveLength(4);
+  const sequences = fake.requests.map(request => request.params.seq as number);
+  expect(sequences.every((seq, index) => index === 0 || seq > sequences[index - 1]!)).toBe(true);
+});
+
+test("acknowledged ordinary projections refresh after the fixed freshness TTL", async () => {
+  const fake = recordingTransport();
+  let now = 10_000;
+  const presence = new PresenceClient(
+    { paneId: "pane", workspaceId: "workspace", socketPath: "/socket" },
+    fake.transport as never,
+    resolvePresenceConfig(),
+    "standalone",
+    () => now,
+  );
+
+  await presence.report("idle", session);
+  now += 4_999;
+  await presence.report("idle", session);
+  now += 1;
+  await presence.report("idle", session);
+
+  expect(fake.requests.filter(request => request.method === "pane.report_agent")).toHaveLength(2);
+});
+
+test("identical ordinary calls share in-flight work and failed semantics remain retryable", async () => {
+  const requests: Request[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  const presence = client({
+    async request(line: string) {
+      const request = JSON.parse(line) as Request;
+      requests.push(request);
+      if (request.method !== "pane.report_agent") return JSON.stringify({ id: request.id, result: {} });
+      calls += 1;
+      if (calls === 1) { await gate; return "invalid"; }
+      if (calls === 2) return "invalid";
+      return JSON.stringify({ id: request.id, result: {} });
+    },
+    cancel() {}, async close() {},
+  });
+
+  const first = presence.report("working", session);
+  const duplicate = presence.report("working", session);
+  release();
+  await Promise.all([first, duplicate]);
+  // The first call exhausted its two attempts; it did not poison the cache.
+  await presence.report("working", session);
+  await presence.report("working", session);
+
+  expect(requests.filter(request => request.method === "pane.report_agent")).toHaveLength(3);
+  const seq = requests.filter(request => request.method === "pane.report_agent").map(request => request.params.seq);
+  expect(seq[0]).toBe(seq[1]);
+  expect(seq[2]).toBeGreaterThan(seq[1] as number);
+});
+
+test("agent and metadata semantic caches are independent", async () => {
+  const fake = recordingTransport();
+  const presence = client(fake.transport);
+  await presence.report("idle", session);
+  await presence.metadata(presentation(), idleTokens);
+  await presence.report("idle", session);
+  await presence.metadata(presentation(), idleTokens);
+
+  expect(fake.requests.filter(request => request.method === "pane.report_agent")).toHaveLength(1);
+  expect(fake.requests.filter(request => request.method === "pane.report_metadata")).toHaveLength(3);
+});
 
 test("client sends bounded static notification requests without retrying them", async () => {
   const fake = recordingTransport();
