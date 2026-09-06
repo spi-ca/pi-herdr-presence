@@ -72,6 +72,36 @@ describe("notification policy module", () => {
     expect(limiter.commit("input", 1)).toBe(true);
   });
 
+  test("holds bounded dedupe and rate reservations until dispatch, then rolls them back on release", () => {
+    const deduper = new NotificationDeduper(100, 2);
+    const first = deduper.reserve("input", 0);
+    expect(first).toBeDefined();
+    expect(deduper.reserve("input", 1)).toBeUndefined();
+    first?.release();
+    expect(deduper.reserve("input", 2)).toBeDefined();
+
+    const limiter = new NotificationRateLimiter(100, 1);
+    const pending = limiter.reserve("other", 0);
+    expect(pending).toBeDefined();
+    expect(limiter.reserve("other", 1)).toBeUndefined();
+    pending?.release();
+    expect(limiter.reserve("other", 2)).toBeDefined();
+
+    const dispatched = deduper.reserve("dispatched", 3);
+    expect(dispatched?.commit(3)).toBe(true);
+    expect(deduper.reserve("dispatched", 4)).toBeUndefined();
+  });
+
+  test("bounds pending reservations without retaining released handles", () => {
+    const deduper = new NotificationDeduper(100, 2);
+    const first = deduper.reserve("first", 0);
+    const second = deduper.reserve("second", 0);
+    expect(deduper.reserve("third", 0)).toBeUndefined();
+    first?.release();
+    expect(deduper.reserve("third", 1)).toBeDefined();
+    second?.release();
+  });
+
   test("removes and resets external attention transition state", () => {
     const transitions = new ExternalAttentionTransitions(2);
 

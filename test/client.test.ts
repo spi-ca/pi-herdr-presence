@@ -30,11 +30,11 @@ function recordingTransport() {
   };
 }
 
-function client(transport: object, timeoutMs = 100, mode: "standalone" | "companion" = "standalone") {
+function client(transport: object, timeoutMs = 100, mode: "standalone" | "companion" = "standalone", maxQueue?: number) {
   return new PresenceClient(
     { paneId: "pane", workspaceId: "workspace", socketPath: "/socket" },
     transport as never,
-    { ...resolvePresenceConfig(), timeoutMs },
+    { ...resolvePresenceConfig(), timeoutMs, ...(maxQueue === undefined ? {} : { maxQueue }) },
     mode,
   );
 }
@@ -653,14 +653,34 @@ test("fencing synchronously cancels outstanding notification keys", async () => 
   expect((presence as unknown as { outstandingNotificationKeys: Map<string, number> }).outstandingNotificationKeys.size).toBe(0);
 });
 
+test("actionable queue residency clamp honors one- and thirty-second boundaries", () => {
+  const deadlines: number[] = [];
+  const transport = {
+    request(_line: string, _key?: string, _priority?: boolean, _timeout?: number, _preempt?: readonly string[], _deadline?: number, _lane?: string, _admission?: unknown, _disposition?: unknown, deadline?: number) {
+      if (deadline !== undefined) deadlines.push(deadline - Date.now());
+      return Promise.resolve('{"id":"ignored","result":{}}');
+    },
+    cancel(_key: string) {},
+    async close() {},
+  };
+  client(transport, 1).notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
+  client(transport, 5_000, "standalone", 16).notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
+  expect(deadlines[0]).toBeGreaterThanOrEqual(999);
+  expect(deadlines[0]).toBeLessThanOrEqual(1_001);
+  expect(deadlines[1]).toBeGreaterThanOrEqual(29_999);
+  expect(deadlines[1]).toBeLessThanOrEqual(30_001);
+});
+
 test("client separates notification queue lanes from sounds", async () => {
   const requests: Request[] = [];
   const lanes: string[] = [];
+  const residencyDeadlines: Array<number | undefined> = [];
   const transport = {
-    async request(line: string, _key?: string, _priority?: boolean, _timeoutMs?: number, _preempt?: readonly string[], _deadlineAt?: number, lane?: string) {
+    async request(line: string, _key?: string, _priority?: boolean, _timeoutMs?: number, _preempt?: readonly string[], _deadlineAt?: number, lane?: string, _admission?: (admitted: boolean) => void, _disposition?: unknown, residencyDeadline?: number) {
       const request = JSON.parse(line) as Request;
       requests.push(request);
       lanes.push(lane ?? "missing");
+      residencyDeadlines.push(residencyDeadline);
       return JSON.stringify({ id: request.id, result: {} });
     },
     cancel(_key: string) {},
@@ -676,4 +696,7 @@ test("client separates notification queue lanes from sounds", async () => {
   expect(requests[1]).toMatchObject({ method: "notification.show", params: { title: "Pi activity completed", body: "Pi activity completed", sound: "done" } });
   expect(requests[2]).toMatchObject({ method: "notification.show", params: { title: "Pi is still working", body: "A Pi task is taking longer than expected", sound: "none" } });
   expect(lanes).toEqual(["actionable", "replaceable", "replaceable"]);
+  // timeout=100 and maxQueue=16 derive 1700ms, clamped independently of the fresh socket timeout.
+  expect(residencyDeadlines[0]).toBeGreaterThanOrEqual(Date.now() + 1_600);
+  expect(residencyDeadlines.slice(1)).toEqual([undefined, undefined]);
 });

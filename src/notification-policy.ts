@@ -13,49 +13,114 @@ export function shouldNotify(policy: NotificationPolicy, enabled: boolean, sever
   return origin === "external";
 }
 
-/** Fixed TTL/LRU gate: a repeated visible edge cannot grow retained state. */
+/** A reservation is inert after either terminal operation; neither operation calls user code. */
+export type NotificationReservation = { commit(now?: number): boolean; release(): void };
+
+/** Fixed TTL/LRU gate with bounded pending keys that block duplicate queue admission. */
 export class NotificationDeduper {
   private readonly entries = new Map<string, number>();
+  private readonly pending = new Map<string, NotificationReservation>();
   constructor(private readonly ttlMs = 60_000, private readonly limit = 64) {}
-  accept(key: string, now = Date.now()): boolean {
+  private prune(now: number) {
     for (const [candidate, expires] of this.entries) if (expires <= now) this.entries.delete(candidate);
+  }
+  reserve(key: string, now = Date.now()): NotificationReservation | undefined {
+    this.prune(now);
+    if (this.entries.has(key) || this.pending.has(key) || this.pending.size >= this.limit) return undefined;
+    let live = true;
+    const reservation: NotificationReservation = {
+      commit: (committedAt = Date.now()) => {
+        if (!live || this.pending.get(key) !== reservation) return false;
+        live = false;
+        this.pending.delete(key);
+        this.prune(committedAt);
+        this.entries.set(key, committedAt + this.ttlMs);
+        while (this.entries.size > this.limit) this.entries.delete(this.entries.keys().next().value!);
+        return true;
+      },
+      release: () => {
+        if (!live || this.pending.get(key) !== reservation) return;
+        live = false;
+        this.pending.delete(key);
+      },
+    };
+    this.pending.set(key, reservation);
+    return reservation;
+  }
+  accept(key: string, now = Date.now()): boolean {
+    this.prune(now);
     const expires = this.entries.get(key);
-    if (expires !== undefined) { this.entries.delete(key); this.entries.set(key, expires); return false; }
-    this.entries.set(key, now + this.ttlMs);
-    while (this.entries.size > this.limit) this.entries.delete(this.entries.keys().next().value!);
-    return true;
+    if (expires !== undefined) {
+      this.entries.delete(key);
+      this.entries.set(key, expires);
+      return false;
+    }
+    const reservation = this.reserve(key, now);
+    return reservation?.commit(now) === true;
   }
   canAccept(key: string, now = Date.now()): boolean {
-    for (const [candidate, expires] of this.entries) if (expires <= now) this.entries.delete(candidate);
-    return !this.entries.has(key);
+    this.prune(now);
+    return !this.entries.has(key) && !this.pending.has(key) && this.pending.size < this.limit;
   }
-  clear() { this.entries.clear(); }
+  clear() { this.entries.clear(); this.pending.clear(); }
 }
 
-/** Session-local fixed-window backstop; each first actionable kind remains deliverable once. */
+/** Session-local fixed-window backstop with bounded transactional queue reservations. */
 export class NotificationRateLimiter {
   private timestamps: number[] = [];
   private readonly actionable = new Set<Exclude<NotificationCooldownKind, "other">>();
+  private readonly pending = new Map<symbol, { kind: NotificationCooldownKind; first: boolean; reservation: NotificationReservation }>();
   constructor(private readonly windowMs = 60_000, private readonly limit = 8) {}
   private prune(now: number) {
     this.timestamps = this.timestamps.filter(timestamp => timestamp + this.windowMs > now);
   }
-  /** Synchronous preflight paired with commit after queue insertion. */
+  private pendingWindowCount() {
+    let count = 0;
+    for (const pending of this.pending.values()) if (!pending.first) count += 1;
+    return count;
+  }
+  private pendingFirst(kind: Exclude<NotificationCooldownKind, "other">) {
+    for (const pending of this.pending.values()) if (pending.first && pending.kind === kind) return true;
+    return false;
+  }
+  /** Preflight includes outstanding reservations, so synchronous admissions cannot oversubscribe capacity. */
   canAccept(kind: NotificationCooldownKind, now = Date.now()): boolean {
     this.prune(now);
-    return (kind !== "other" && !this.actionable.has(kind)) || this.timestamps.length < this.limit;
+    return (kind !== "other" && !this.actionable.has(kind) && !this.pendingFirst(kind))
+      || this.timestamps.length + this.pendingWindowCount() < this.limit;
   }
-  /** Commit only a request that synchronously entered the transport queue. */
+  reserve(kind: NotificationCooldownKind, now = Date.now()): NotificationReservation | undefined {
+    if (!this.canAccept(kind, now) || this.pending.size >= this.limit + 3) return undefined;
+    const first = kind !== "other" && !this.actionable.has(kind) && !this.pendingFirst(kind);
+    const id = Symbol(kind);
+    let live = true;
+    const reservation: NotificationReservation = {
+      commit: (committedAt = Date.now()) => {
+        const pending = this.pending.get(id);
+        if (!live || pending?.reservation !== reservation) return false;
+        live = false;
+        this.pending.delete(id);
+        this.prune(committedAt);
+        if (first) this.actionable.add(kind as Exclude<NotificationCooldownKind, "other">);
+        else this.timestamps.push(committedAt);
+        return true;
+      },
+      release: () => {
+        if (!live || this.pending.get(id)?.reservation !== reservation) return;
+        live = false;
+        this.pending.delete(id);
+      },
+    };
+    this.pending.set(id, { kind, first, reservation });
+    return reservation;
+  }
+  /** Compatible immediate commit API. */
   commit(kind: NotificationCooldownKind, now = Date.now()): boolean {
-    if (!this.canAccept(kind, now)) return false;
-    if (kind !== "other" && !this.actionable.has(kind)) this.actionable.add(kind);
-    else this.timestamps.push(now);
-    return true;
+    const reservation = this.reserve(kind, now);
+    return reservation?.commit(now) === true;
   }
-  accept(kind: NotificationCooldownKind, now = Date.now()): boolean {
-    return this.commit(kind, now);
-  }
-  clear() { this.timestamps = []; this.actionable.clear(); }
+  accept(kind: NotificationCooldownKind, now = Date.now()): boolean { return this.commit(kind, now); }
+  clear() { this.timestamps = []; this.actionable.clear(); this.pending.clear(); }
 }
 
 /** Bounded per-source semantic fence for V2 state transitions. */

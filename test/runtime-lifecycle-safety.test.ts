@@ -678,11 +678,11 @@ test("gated startup retains post-activation live input, paired failure, terminal
     expect(metadataIndex).toBeGreaterThan(agentIndex);
     // Activation replay remains quiet, but these accepted events arrived after
     // activate() returned. The paired state failure is suppressed by its live
-    // terminal, while input → terminal → blocked preserves arrival order.
+    // terminal; the external non-error blocked edge remains in the default
+    // errors-only policy's pane projection but does not create a static toast.
     const notices = requests.filter((request) => request.method === "notification.show");
     expect(notices.map((request) => request.params)).toEqual([
       { title: "Pi needs your input", body: "Pi needs your input", sound: "request" },
-      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
       { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
     ]);
     const terminalTokens = requests

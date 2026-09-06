@@ -8,7 +8,7 @@ import { ExternalAttentionTransitions, NotificationDeduper, NotificationRateLimi
 import { officialHookStatus } from "./official-hook.js";
 import { processCoordinator } from "./process-coordinator.js";
 import { attentionText, compositeState, isInteractionWaiting, isLiveInputRequest, metadata, presentation, safeMessage } from "./presentation.js";
-import { HerdrSocketTransport } from "./transport.js";
+import { HerdrSocketTransport, type QueueDisposition } from "./transport.js";
 import { WorkspaceSummaryLease, type WorkspaceSummaryScheduler } from "./workspace-summary.js";
 import { TodoProgressAdapter } from "./todo.js";
 import { UsageTracker } from "./usage.js";
@@ -35,8 +35,21 @@ type SessionManagerProvider = { getSessionId?: () => unknown };
 type ContextUsageProvider = { getContextUsage?: () => unknown; isIdle?: () => boolean; sessionManager?: SessionManagerProvider };
 type Terminal = "success" | "error" | "cancelled";
 type LocalSource = "pi" | "todo";
-type FailureArrival = { source: string; generation: number; acceptedAt: number; expiresAt: number; inputLifecycleId?: number; timer?: ReturnType<typeof setTimeout>; notify?: () => void };
-type InputLifecycle = { id: number; acceptedAt: number; endedAt?: number; expiresAt?: number; attempted: boolean; admitted: boolean; purgeTimer?: ReturnType<typeof setTimeout> };
+type FailureArrival = { source: string; generation: number; acceptedAt: number; expiresAt: number; inputLifecycleId?: number; timer?: ReturnType<typeof setTimeout>; notify?: (immediateExternal?: boolean) => void };
+type InputLifecycle = {
+  id: number;
+  acceptedAt: number;
+  endedAt?: number;
+  expiresAt?: number;
+  /** Admission stays pending until queue dispatch; a release never suppresses a paired failure. */
+  notificationStatus: "pending" | "dispatched" | "released";
+  /** Exact client key; ending this lifecycle must never cancel a later one. */
+  notificationKey?: string;
+  fallbacks: Array<(immediateExternal?: boolean) => void>;
+  /** Overflow is aggregated; callbacks never run merely because the bound was reached. */
+  fallbackOverflow: boolean;
+  purgeTimer?: ReturnType<typeof setTimeout>;
+};
 type RuntimeSession = { id: string; ref: SessionRef; manager: SessionManagerProvider };
 type DerivedUsage = { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: number };
 type DerivedTodo = Pick<PresenceStateInputV2, "state" | "progress">;
@@ -239,6 +252,9 @@ export class PresenceRuntime {
 
   async startSession(context: unknown, event?: unknown) {
     const deadlineAt = this.lifecycleDeadline();
+    // Advance the callback fence before cancelling old notifications: deferred
+    // release callbacks must not revive old fallbacks.
+    const epoch = ++this.epoch;
     // A replacement must release the managed integration's counter and fence
     // ordinary client output synchronously, before teardown/probing can await.
     this.releaseCompanionBlocked();
@@ -246,7 +262,6 @@ export class PresenceRuntime {
     this.resetLongRunningTimer();
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
-    const epoch = ++this.epoch;
     // A session boundary permits a distinct Todo implementation in the new root.
     this.todo.reset();
     this.clearPendingNotifications();
@@ -603,8 +618,8 @@ export class PresenceRuntime {
       if (deferLiveNotification) this.appendPendingNotification({ kind: "withdraw", inputPresent, acceptedAt: this.nextNotificationAcceptanceTime() });
       return;
     }
-    this.render();
-    this.syncInputNotification();
+    const deferProjection = this.syncInputNotification(false, inputPresent);
+    this.renderAfterInputRelease(deferProjection);
   }
 
   /**
@@ -662,8 +677,24 @@ export class PresenceRuntime {
       }
       return;
     }
+    const inputPresent = this.inputWaiting();
+    if (!inputPresent) {
+      const deferProjection = this.syncInputNotification(liveInput, inputPresent, acceptedAt);
+      this.renderAfterInputRelease(deferProjection);
+      return;
+    }
     this.render();
-    this.syncInputNotification(liveInput, this.inputWaiting(), acceptedAt);
+    this.syncInputNotification(liveInput, inputPresent, acceptedAt);
+  }
+  /** Let a cancelled input's queued fallback claim capacity before its end projection. */
+  private renderAfterInputRelease(deferProjection: boolean) {
+    if (!deferProjection) {
+      this.render();
+      return;
+    }
+    queueMicrotask(() => {
+      if (this.canOutput()) this.render();
+    });
   }
   private discardPendingLifecycle(epoch: number) { if (this.pendingLifecycle?.epoch === epoch) this.pendingLifecycle = null; }
   private abandonStartup(epoch: number) { this.discardPendingLifecycle(epoch); }
@@ -959,9 +990,10 @@ export class PresenceRuntime {
     this.releaseCompanionBlocked();
     this.nativePromptEpoch = null;
     this.resetLongRunningTimer();
+    // Make cancellation disposition callbacks stale before the client drains them.
+    ++this.epoch;
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
-    ++this.epoch;
     this.ingressEpoch = null;
     this.outputReady = false;
     this.pendingLifecycle = null;
@@ -1085,22 +1117,23 @@ export class PresenceRuntime {
   }
 
   /** One live input lifecycle yields at most one alert; retained replay only restores pane state. */
-  private syncInputNotification(liveInput = false, inputPresent = this.inputWaiting(), acceptedAt?: number) {
+  private syncInputNotification(liveInput = false, inputPresent = this.inputWaiting(), acceptedAt?: number): boolean {
     const edgeAt = acceptedAt ?? this.nextNotificationAcceptanceTime();
     if (!inputPresent) {
       if (this.inputNotificationPending && !this.inputNotificationAttempted && this.outputReady) this.dispatchPendingInputNotification(edgeAt);
-      this.endInputLifecycle(edgeAt);
+      const deferProjection = this.endInputLifecycle(edgeAt);
       this.resetInputNotificationState();
-      return;
+      return deferProjection;
     }
     if (!this.inputLifecycleActive) {
       this.inputLifecycleActive = true;
       this.beginInputLifecycle(edgeAt);
     }
-    if (this.inputNotificationAttempted) return;
+    if (this.inputNotificationAttempted) return false;
     if (liveInput) this.inputNotificationPending = true;
-    if (!this.inputNotificationPending || !this.outputReady) return;
+    if (!this.inputNotificationPending || !this.outputReady) return false;
     this.dispatchPendingInputNotification(edgeAt);
+    return false;
   }
 
   /** Input is attempted immediately; only an admitted attempt can suppress its attached failures. */
@@ -1110,8 +1143,13 @@ export class PresenceRuntime {
     this.inputNotificationAttempted = true;
     this.inputNotificationTransitions = Math.min(MAX_NOTIFICATION_TRANSITIONS, this.inputNotificationTransitions + 1);
     this.discardExternalProgress();
-    const admitted = this.notify("attention", `input:${this.turn}:${this.inputNotificationTransitions}`, "Pi needs your input", "Pi needs your input", "local");
-    this.recordInputAdmission(this.currentInputLifecycleId, admitted);
+    const lifecycleId = this.currentInputLifecycleId;
+    const key = `input:${this.turn}:${this.inputNotificationTransitions}`;
+    const lifecycle = this.inputLifecycle(lifecycleId);
+    if (lifecycle) lifecycle.notificationKey = key;
+    this.setInputNotificationStatus(lifecycleId, "pending");
+    const admitted = this.notify("attention", key, "Pi needs your input", "Pi needs your input", "local", lifecycleId);
+    if (!admitted) this.setInputNotificationStatus(lifecycleId, "released");
     return admitted;
   }
 
@@ -1119,8 +1157,12 @@ export class PresenceRuntime {
   private dispatchPendingStartupInput(lifecycleId: number): boolean {
     this.inputNotificationTransitions = Math.min(MAX_NOTIFICATION_TRANSITIONS, this.inputNotificationTransitions + 1);
     this.discardExternalProgress();
-    const admitted = this.notify("attention", `input:${this.turn}:${this.inputNotificationTransitions}`, "Pi needs your input", "Pi needs your input", "local");
-    this.recordInputAdmission(lifecycleId, admitted);
+    const key = `input:${this.turn}:${this.inputNotificationTransitions}`;
+    const lifecycle = this.inputLifecycle(lifecycleId);
+    if (lifecycle) lifecycle.notificationKey = key;
+    this.setInputNotificationStatus(lifecycleId, "pending");
+    const admitted = this.notify("attention", key, "Pi needs your input", "Pi needs your input", "local", lifecycleId);
+    if (!admitted) this.setInputNotificationStatus(lifecycleId, "released");
     return admitted;
   }
 
@@ -1130,8 +1172,9 @@ export class PresenceRuntime {
     const lifecycle: InputLifecycle = {
       id: ++this.nextInputLifecycleId,
       acceptedAt,
-      attempted: false,
-      admitted: false,
+      notificationStatus: "released",
+      fallbacks: [],
+      fallbackOverflow: false,
     };
     this.inputLifecycles.push(lifecycle);
     this.currentInputLifecycleId = lifecycle.id;
@@ -1145,27 +1188,63 @@ export class PresenceRuntime {
     return lifecycle;
   }
 
-  private endInputLifecycle(endedAt: number) {
+  private endInputLifecycle(endedAt: number): boolean {
     const current = this.inputLifecycle(this.currentInputLifecycleId);
+    let deferProjection = false;
     if (current && current.endedAt === undefined) {
       current.endedAt = endedAt;
+      // An input alert remains actionable only until its physical write. Cancel
+      // this exact pre-wire key; a newer lifecycle cannot share it.
+      if (current.notificationStatus === "pending" && current.notificationKey) {
+        // The queue confirms this remains pre-write before cancelling it. Release
+        // its paired fallback synchronously, so it owns capacity before any end
+        // projection is allowed to enqueue.
+        if (this.client?.cancelNotification(current.notificationKey)) {
+          deferProjection = true;
+          this.setInputNotificationStatus(current.id, "released");
+        }
+      }
       current.expiresAt = Date.now() + INPUT_FAILURE_WINDOW_MS;
       current.purgeTimer = setTimeout(() => this.purgeInputLifecycles(), INPUT_FAILURE_WINDOW_MS);
       current.purgeTimer.unref?.();
     }
     this.currentInputLifecycleId = null;
     this.purgeInputLifecycles();
+    return deferProjection;
   }
 
   private inputLifecycle(id: number | null | undefined): InputLifecycle | undefined {
     return id === undefined || id === null ? undefined : this.inputLifecycles.find((lifecycle) => lifecycle.id === id);
   }
 
-  private recordInputAdmission(id: number | null, admitted: boolean) {
+  private setInputNotificationStatus(id: number | null, status: "pending" | "dispatched" | "released") {
     const lifecycle = this.inputLifecycle(id);
-    if (!lifecycle) return;
-    lifecycle.attempted = true;
-    lifecycle.admitted = admitted;
+    if (!lifecycle || lifecycle.notificationStatus === status) return;
+    lifecycle.notificationStatus = status;
+    if (status === "dispatched") {
+      // A physical input write makes delivery ambiguous; never cancel or retry it.
+      lifecycle.notificationKey = undefined;
+      lifecycle.fallbacks.length = 0;
+      lifecycle.fallbackOverflow = false;
+      return;
+    }
+    if (status !== "released") return;
+    lifecycle.notificationKey = undefined;
+    // Detach all callbacks and the overflow marker before executing anything:
+    // reentrancy or a policy exception cannot retain this lifecycle.
+    const fallbacks = lifecycle.fallbacks.splice(0);
+    const overflow = lifecycle.fallbackOverflow;
+    lifecycle.fallbackOverflow = false;
+    for (const fallback of fallbacks) {
+      // A released input must let its paired external failure reserve the
+      // newly free queue slot before the deferred prompt-end projection.
+      try { fallback(true); } catch { /* fallback output is observer-only */ }
+    }
+    if (overflow) {
+      try {
+        this.notify("error", `input-failure-overflow:${lifecycle.id}`, "Pi needs attention", "A Pi task needs attention", "local");
+      } catch { /* fallback output is observer-only */ }
+    }
   }
 
   /** A live failure joins an active lifecycle only at its bounded acceptance edge. */
@@ -1191,16 +1270,29 @@ export class PresenceRuntime {
   }
 
   private failureSuppressedByLifecycle(id: number | undefined): boolean {
-    const lifecycle = this.inputLifecycle(id);
-    return lifecycle?.attempted === true && lifecycle.admitted;
+    return this.inputLifecycle(id)?.notificationStatus === "dispatched";
   }
+
+  private deferFailureUntilInputDisposition(id: number | undefined, notify: (immediateExternal?: boolean) => void): boolean {
+    const lifecycle = this.inputLifecycle(id);
+    if (!lifecycle || lifecycle.notificationStatus !== "pending") return false;
+    // Preserve a bounded set while pending. Overflow is represented by one
+    // aggregate marker, never by executing an early fallback before disposition.
+    if (lifecycle.fallbacks.length < MAX_FAILURE_PAIRS) lifecycle.fallbacks.push(notify);
+    else lifecycle.fallbackOverflow = true;
+    return true;
+  }
+
 
   private purgeInputLifecycles(now = Date.now()) {
     for (let index = this.inputLifecycles.length - 1; index >= 0; index -= 1) {
       const lifecycle = this.inputLifecycles[index]!;
-      const referenced = this.failureArrivals.some((arrival) => arrival.inputLifecycleId === lifecycle.id || (
-        arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS
-      ));
+      const referenced = lifecycle.notificationStatus === "pending"
+        || lifecycle.fallbacks.length > 0
+        || lifecycle.fallbackOverflow
+        || this.failureArrivals.some((arrival) => arrival.inputLifecycleId === lifecycle.id || (
+          arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS
+        ));
       if (lifecycle.id !== this.currentInputLifecycleId && lifecycle.expiresAt !== undefined && lifecycle.expiresAt <= now && !referenced) {
         if (lifecycle.purgeTimer) clearTimeout(lifecycle.purgeTimer);
         this.inputLifecycles.splice(index, 1);
@@ -1208,10 +1300,14 @@ export class PresenceRuntime {
     }
     // At most one currently active lifecycle can exist in addition to every
     // bounded failure arrival. Never evict a receipt still referenced by one.
-    while (this.inputLifecycles.length > MAX_FAILURE_PAIRS + 1) {
-      const removable = this.inputLifecycles.findIndex((lifecycle) => lifecycle.id !== this.currentInputLifecycleId && !this.failureArrivals.some((arrival) => arrival.inputLifecycleId === lifecycle.id || (
-        arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS
-      )));
+    while (this.inputLifecycles.length > Math.max(MAX_FAILURE_PAIRS + 1, this.config.maxQueue + 1)) {
+      const removable = this.inputLifecycles.findIndex((lifecycle) => lifecycle.id !== this.currentInputLifecycleId
+        && lifecycle.notificationStatus !== "pending"
+        && lifecycle.fallbacks.length === 0
+        && !lifecycle.fallbackOverflow
+        && !this.failureArrivals.some((arrival) => arrival.inputLifecycleId === lifecycle.id || (
+          arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS
+        )));
       if (removable < 0) break;
       const [lifecycle] = this.inputLifecycles.splice(removable, 1);
       if (lifecycle?.purgeTimer) clearTimeout(lifecycle.purgeTimer);
@@ -1280,8 +1376,8 @@ export class PresenceRuntime {
       if (deferFailure) {
         // Let a same-turn terminal claim the alert, while state-only failures retain
         // their normal policy, coalescing, and rate-limit behavior.
-        this.queueStateFailure(attention.source, attention.generation, acceptedAt, inputLifecycleId, () => {
-          this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin, false, failureKey);
+        this.queueStateFailure(attention.source, attention.generation, acceptedAt, inputLifecycleId, (immediateExternal = false) => {
+          this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin, immediateExternal, failureKey);
         });
         return;
       }
@@ -1368,7 +1464,7 @@ export class PresenceRuntime {
   }
 
   /** State failures wait only for the existing synchronous input arbitration. */
-  private queueStateFailure(source: string, generation: number, acceptedAt: number, inputLifecycleId: number | undefined, notify: () => void) {
+  private queueStateFailure(source: string, generation: number, acceptedAt: number, inputLifecycleId: number | undefined, notify: (immediateExternal?: boolean) => void) {
     this.purgeFailureArrivals();
     const entry: FailureArrival = { source, generation, acceptedAt, expiresAt: Date.now() + INPUT_FAILURE_WINDOW_MS, inputLifecycleId, notify };
     entry.timer = setTimeout(() => this.expireFailureArrival(entry), INPUT_FAILURE_WINDOW_MS);
@@ -1380,7 +1476,9 @@ export class PresenceRuntime {
     if (!this.removeFailureArrival(entry)) return;
     if (entry.inputLifecycleId === undefined)
       entry.inputLifecycleId = this.recentInputLifecycleForFailure(entry.acceptedAt);
-    if (!this.failureSuppressedByLifecycle(entry.inputLifecycleId)) entry.notify?.();
+    const notify = entry.notify;
+    if (!this.failureSuppressedByLifecycle(entry.inputLifecycleId) && notify
+      && !this.deferFailureUntilInputDisposition(entry.inputLifecycleId, notify)) notify();
     this.purgeInputLifecycles();
   }
   private removeFailureArrival(entry: FailureArrival): boolean {
@@ -1396,7 +1494,9 @@ export class PresenceRuntime {
       if (entry.expiresAt > now || !this.removeFailureArrival(entry)) continue;
       if (entry.inputLifecycleId === undefined)
         entry.inputLifecycleId = this.recentInputLifecycleForFailure(entry.acceptedAt);
-      if (!this.failureSuppressedByLifecycle(entry.inputLifecycleId)) entry.notify?.();
+      const notify = entry.notify;
+      if (!this.failureSuppressedByLifecycle(entry.inputLifecycleId) && notify
+        && !this.deferFailureUntilInputDisposition(entry.inputLifecycleId, notify)) notify();
     }
     this.purgeInputLifecycles();
   }
@@ -1406,7 +1506,9 @@ export class PresenceRuntime {
     while (this.failureArrivals.length > MAX_FAILURE_PAIRS) {
       const expired = this.failureArrivals.shift();
       if (expired?.timer) clearTimeout(expired.timer);
-      if (!this.failureSuppressedByLifecycle(expired?.inputLifecycleId)) expired?.notify?.();
+      const notify = expired?.notify;
+      if (!this.failureSuppressedByLifecycle(expired?.inputLifecycleId) && notify
+        && !this.deferFailureUntilInputDisposition(expired?.inputLifecycleId, notify)) notify();
     }
     this.purgeInputLifecycles();
   }
@@ -1472,17 +1574,48 @@ export class PresenceRuntime {
    * admission. Known queue/closed/serialization rejection must not consume a
    * dedupe or rate slot; delivery after dispatch remains intentionally unknown.
    */
-  private notify(severity: NotificationSeverity, key: string, title: string, body: string, origin: "local" | "external"): boolean {
+  private notify(
+    severity: NotificationSeverity,
+    key: string,
+    title: string,
+    body: string,
+    origin: "local" | "external",
+    inputLifecycleId?: number | null,
+  ): boolean {
     if (!this.canOutput() || !shouldNotify(this.config.notificationPolicy, this.config.notifications, severity, origin)) return false;
-    if (!this.notifications.canAccept(key)) { this.notifications.accept(key); return false; }
+    const dedupe = this.notifications.reserve(key);
+    if (!dedupe) return false;
     const rateKind = this.notificationCooldownKind(severity, key);
-    if (!this.notificationRate.canAccept(rateKind)) return false;
-    const admitted = this.client?.notify(title, body, this.notificationOptions(severity), key) === true;
-    if (!admitted) return false;
-    // These operations follow the transport's synchronous admission callback
-    // without an await, so preflight and commit cannot be interleaved in JS.
-    this.notifications.accept(key);
-    return this.notificationRate.commit(rateKind);
+    const rate = this.notificationRate.reserve(rateKind);
+    if (!rate) { dedupe.release(); return false; }
+    const epoch = this.epoch;
+    const client = this.client;
+    if (!client) { dedupe.release(); rate.release(); return false; }
+    const disposition = (result: QueueDisposition) => {
+      // Clear the transactional policy state before any lifecycle-owned fallback.
+      // A replacement clears both policy stores, making stale callbacks inert.
+      if (result.status === "dispatched") {
+        dedupe.commit();
+        rate.commit();
+      } else {
+        dedupe.release();
+        rate.release();
+      }
+      if (this.epoch !== epoch || this.client !== client) return;
+      if (inputLifecycleId !== undefined) {
+        this.setInputNotificationStatus(
+          inputLifecycleId,
+          result.status === "dispatched" ? "dispatched" : "released",
+        );
+      }
+    };
+    const admitted = client.notify(title, body, this.notificationOptions(severity), key, disposition);
+    if (!admitted) {
+      dedupe.release();
+      rate.release();
+      return false;
+    }
+    return true;
   }
 
   private notificationCooldownKind(severity: NotificationSeverity, key: string): NotificationCooldownKind {
