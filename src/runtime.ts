@@ -40,6 +40,16 @@ type InputLifecycle = { id: number; acceptedAt: number; endedAt?: number; expire
 type RuntimeSession = { id: string; ref: SessionRef; manager: SessionManagerProvider };
 type DerivedUsage = { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: number };
 type DerivedTodo = Pick<PresenceStateInputV2, "state" | "progress">;
+export type LongRunningScheduler = {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
+};
+const SYSTEM_LONG_RUNNING_SCHEDULER: LongRunningScheduler = {
+  now: () => Number(process.hrtime.bigint() / 1_000_000n),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
 type PendingLifecycleEdge =
   | { kind: "agent_start" }
   | { kind: "turn_start"; contextPercent?: number }
@@ -197,7 +207,11 @@ export class PresenceRuntime {
   private terminalClearTimer: ReturnType<typeof setTimeout> | undefined;
   /** The workspace lease is observer-only and independently paced below its fixed TTL. */
   private readonly workspaceLease: WorkspaceSummaryLease;
+  /** One parent-turn budget, armed only while the composed observer state is working. */
   private longRunningTimer: ReturnType<typeof setTimeout> | undefined;
+  private longRunningRemaining: number | null = null;
+  private longRunningArmedAt: number | null = null;
+  private longRunningNotified = false;
   private externalAttention = new ExternalAttentionTransitions();
   private notifications = new NotificationDeduper();
   private notificationRate = new NotificationRateLimiter();
@@ -212,6 +226,7 @@ export class PresenceRuntime {
     private config: PresenceConfig,
     workspaceScheduler?: WorkspaceSummaryScheduler,
     private notificationClock: () => number = () => Number(process.hrtime.bigint() / 1_000_000n),
+    private readonly longRunningScheduler: LongRunningScheduler = SYSTEM_LONG_RUNNING_SCHEDULER,
   ) {
     this.workspaceLease = new WorkspaceSummaryLease({
       workspaceMainSummary: async (summary) => {
@@ -228,6 +243,7 @@ export class PresenceRuntime {
     // ordinary client output synchronously, before teardown/probing can await.
     this.releaseCompanionBlocked();
     this.nativePromptEpoch = null;
+    this.resetLongRunningTimer();
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
     const epoch = ++this.epoch;
@@ -487,7 +503,7 @@ export class PresenceRuntime {
     if (reloadActive) {
       this.active = true;
       this.turn += 1;
-      this.startLongRunningTimer();
+      this.beginLongRunningTimer();
       this.publish("running");
     } else this.publish("idle");
     // Never await the observer-only lease. Its pane.list round trip is bounded
@@ -552,6 +568,7 @@ export class PresenceRuntime {
       if (!event.attention) this.externalAttention.remove(event.source);
       this.states.set(event.source, event);
       this.syncCompanionBlocked();
+      this.syncLongRunningTimer();
       const inputPresent = this.inputWaiting();
       const acceptedAt = !this.activationReplay && this.consumerActive ? this.nextNotificationAcceptanceTime() : 0;
       const failureKey = this.failureKeyForState(event, acceptedAt);
@@ -580,6 +597,7 @@ export class PresenceRuntime {
     this.states.delete(event.source);
     this.externalAttention.remove(event.source);
     this.syncCompanionBlocked();
+    this.syncLongRunningTimer();
     const inputPresent = this.inputWaiting();
     if (!this.outputReady || deferLiveNotification) {
       if (deferLiveNotification) this.appendPendingNotification({ kind: "withdraw", inputPresent, acceptedAt: this.nextNotificationAcceptanceTime() });
@@ -633,6 +651,7 @@ export class PresenceRuntime {
   private inputWaiting(): boolean { return this.nativePromptWaiting() || [...this.states.values()].some(isInteractionWaiting); }
   private syncNativePromptState(liveInput = false, acceptedAt?: number) {
     this.syncCompanionBlocked();
+    this.syncLongRunningTimer();
     if (this.initialProjectionInFlight) this.initialProjectionDirty = true;
     if (!this.outputReady) {
       // Unlike retained replay, native UI edges are live. Keep their exact
@@ -802,7 +821,7 @@ export class PresenceRuntime {
       this.active = true;
       this.turn += 1;
       this.usage = new UsageTracker();
-      this.startLongRunningTimer();
+      this.beginLongRunningTimer();
     }
     this.updateContextUsage();
     this.publish("running");
@@ -825,6 +844,7 @@ export class PresenceRuntime {
       return;
     }
     this.terminal = deriveTerminalState(event, this.toolFailed);
+    this.resetLongRunningTimer();
   }
 
   handleAgentSettled(context: unknown) {
@@ -850,7 +870,7 @@ export class PresenceRuntime {
     this.activateLocalCandidates();
     if (!this.active || !this.isActiveSessionFence(fence)) return;
     this.active = false;
-    this.clearLongRunningTimer();
+    this.resetLongRunningTimer();
     this.updateContextUsage();
     // A settlement emits a state and a terminal, so reserve both before either can consume the final ordinal.
     if (this.reserveLocalOrdinals(2, true)) {
@@ -921,7 +941,7 @@ export class PresenceRuntime {
       switch (edge.kind) {
         case "agent_start": this.startActiveAgent(pending.context); break;
         case "turn_start": if (edge.contextPercent !== undefined) this.usage.setContext({ contextPercent: edge.contextPercent }); break;
-        case "agent_end": this.terminal = edge.terminal ?? (this.toolFailed ? "error" : "success"); break;
+        case "agent_end": this.terminal = edge.terminal ?? (this.toolFailed ? "error" : "success"); this.resetLongRunningTimer(); break;
         case "agent_settled": this.settleActiveAgent(fence); break;
         case "message_end": this.usage.add(edge.usage); this.updateContextUsage(); this.render(); break;
         case "tool_result": this.applyDerivedTool(edge); break;
@@ -938,6 +958,7 @@ export class PresenceRuntime {
     // Fence and abort observer eligibility before queued lifecycle teardown.
     this.releaseCompanionBlocked();
     this.nativePromptEpoch = null;
+    this.resetLongRunningTimer();
     this.client?.fenceOrdinaryOutput();
     this.workspaceLease.stop();
     ++this.epoch;
@@ -1449,7 +1470,7 @@ export class PresenceRuntime {
     if (!this.notifications.canAccept(key)) { this.notifications.accept(key); return false; }
     const rateKind = this.notificationCooldownKind(severity, key);
     if (!this.notificationRate.canAccept(rateKind)) return false;
-    const admitted = this.client?.notify(title, body, severity === "error" || severity === "attention", key) === true;
+    const admitted = this.client?.notify(title, body, this.notificationOptions(severity), key) === true;
     if (!admitted) return false;
     // These operations follow the transport's synchronous admission callback
     // without an await, so preflight and commit cannot be interleaved in JS.
@@ -1461,18 +1482,72 @@ export class PresenceRuntime {
     return severity === "error" ? "error" : key.startsWith("input:") ? "input" : key.startsWith("blocked:") ? "blocked" : "other";
   }
 
-  private startLongRunningTimer() {
-    this.clearLongRunningTimer();
-    const epoch = this.epoch;
-    const turn = this.turn;
-    this.longRunningTimer = setTimeout(() => {
-      this.longRunningTimer = undefined;
-      if (this.epoch === epoch && this.active && this.turn === turn) this.notify("long-running", `long-running:${turn}`, "Pi is still working", "A Pi task is taking longer than expected", "local");
-    }, this.config.longRunningMs);
-    this.longRunningTimer.unref?.();
+  private notificationOptions(severity: NotificationSeverity) {
+    if (severity === "long-running") return { actionable: false, sound: "none" } as const;
+    if (severity === "error" || severity === "attention") return { actionable: true, sound: "request" } as const;
+    return { actionable: false, sound: "done" } as const;
   }
 
-  private clearLongRunningTimer() { if (this.longRunningTimer) clearTimeout(this.longRunningTimer); this.longRunningTimer = undefined; }
+  /** Start one fresh parent-turn working-time budget; retained blocked state stays unarmed. */
+  private beginLongRunningTimer() {
+    this.resetLongRunningTimer();
+    this.longRunningRemaining = this.config.longRunningMs;
+    this.syncLongRunningTimer();
+  }
+
+  private longRunningWorking(): boolean {
+    return this.active && compositeState([...this.states.values()], this.active, this.nativePromptWaiting()) === "working";
+  }
+
+  /** Pause/resume is idempotent, so overlapping native and V2 input cannot double-count work. */
+  private syncLongRunningTimer() {
+    if (this.longRunningRemaining === null || this.longRunningNotified) return;
+    if (!this.longRunningWorking()) { this.pauseLongRunningTimer(); return; }
+    if (this.longRunningArmedAt !== null) return;
+    if (this.longRunningRemaining <= 0) { this.fireLongRunningTimer(this.epoch, this.turn); return; }
+    const epoch = this.epoch;
+    const turn = this.turn;
+    const timer = this.longRunningScheduler.setTimeout(() => {
+      if (this.longRunningTimer !== timer) return;
+      this.longRunningTimer = undefined;
+      this.fireLongRunningTimer(epoch, turn);
+    }, this.longRunningRemaining);
+    timer.unref?.();
+    this.longRunningTimer = timer;
+    this.longRunningArmedAt = this.longRunningScheduler.now();
+  }
+
+  /** Retire only elapsed armed work; blocked wall time never reduces the remaining budget. */
+  private pauseLongRunningTimer() {
+    if (this.longRunningTimer) this.longRunningScheduler.clearTimeout(this.longRunningTimer);
+    this.longRunningTimer = undefined;
+    if (this.longRunningArmedAt !== null && this.longRunningRemaining !== null) {
+      const elapsed = this.longRunningScheduler.now() - this.longRunningArmedAt;
+      if (Number.isFinite(elapsed) && elapsed > 0) this.longRunningRemaining = Math.max(0, this.longRunningRemaining - elapsed);
+    }
+    this.longRunningArmedAt = null;
+  }
+
+  /** Timer callbacks are fenced again because state can change between queueing and execution. */
+  private fireLongRunningTimer(epoch: number, turn: number) {
+    if (this.epoch !== epoch || this.turn !== turn || !this.active || !this.longRunningWorking()) return;
+    this.pauseLongRunningTimer();
+    if (this.longRunningRemaining === null || this.longRunningRemaining > 0 || this.longRunningNotified) {
+      this.syncLongRunningTimer();
+      return;
+    }
+    this.longRunningNotified = true;
+    this.notify("long-running", `long-running:${turn}`, "Pi is still working", "A Pi task is taking longer than expected", "local");
+  }
+
+  /** Agent end/settlement, replacement, and shutdown erase every timer fence and budget. */
+  private resetLongRunningTimer() {
+    if (this.longRunningTimer) this.longRunningScheduler.clearTimeout(this.longRunningTimer);
+    this.longRunningTimer = undefined;
+    this.longRunningRemaining = null;
+    this.longRunningArmedAt = null;
+    this.longRunningNotified = false;
+  }
 
   /** Activate only unowned candidates. A successful takeover replays a newly ordinaled snapshot. */
   private activateLocalCandidates() {
@@ -1518,7 +1593,7 @@ export class PresenceRuntime {
     this.initialProjectionInFlight = false;
     this.initialProjectionDirty = false;
     this.activationReplay = false;
-    this.clearLongRunningTimer();
+    this.resetLongRunningTimer();
     this.clearExternalAttention();
     // The ordinary ordinal reservation leaves withdrawal room at the maximum generation.
     this.withdrawAndDeactivateLocalSources();
