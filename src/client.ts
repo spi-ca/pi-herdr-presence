@@ -16,7 +16,7 @@ import {
 	type HerdrMethod,
 	type HerdrPresentation,
 } from "./protocol.js";
-import { HerdrSocketTransport, PresenceTransportError } from "./transport.js";
+import { HerdrSocketTransport, PresenceTransportError, type QueueLane } from "./transport.js";
 import { processCoordinator } from "./process-coordinator.js";
 import { hasControlOrBidi } from "./validation.js";
 
@@ -86,6 +86,7 @@ export class PresenceClient {
 				...sessionRef,
 			},
 			"session",
+			"protected",
 			false,
 			true,
 			false,
@@ -184,6 +185,7 @@ export class PresenceClient {
 				),
 			},
 			"metadata-legacy-clear",
+			"protected",
 			false,
 			false,
 			true,
@@ -264,6 +266,9 @@ export class PresenceClient {
 					"workspace-main-summary",
 					false,
 					WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS,
+					undefined,
+					undefined,
+					"replaceable",
 				),
 				id,
 			);
@@ -305,7 +310,7 @@ export class PresenceClient {
 					clear_state_labels: true,
 					tokens,
 				};
-		await this.send("pane.report_metadata", params, key, true, retry, true, deadlineAt);
+		await this.send("pane.report_metadata", params, key, "protected", true, retry, true, deadlineAt);
 	}
 	/** Teardown repeats the exact legacy chunk only for standalone ownership. */
 	private async clearLegacyMetadataOnTeardown(deadlineAt?: number): Promise<void> {
@@ -325,6 +330,7 @@ export class PresenceClient {
 				),
 			},
 			"metadata-teardown-legacy-clear",
+			"protected",
 			true,
 			false,
 			true,
@@ -335,14 +341,15 @@ export class PresenceClient {
 	async notify(
 		title: string,
 		body: string,
-		error = false,
+		actionable: boolean,
 		key = "default",
 	): Promise<void> {
 		if (!this.config.notifications) return;
 		await this.send(
 			"notification.show",
-			{ title, body, sound: error ? "request" : "done" },
+			{ title, body, sound: actionable ? "request" : "done" },
 			`notification:${key}`,
+			actionable ? "actionable" : "replaceable",
 			false,
 			false,
 		);
@@ -357,6 +364,7 @@ export class PresenceClient {
 			"pane.clear_agent_authority",
 			{ pane_id: this.identity.paneId, source: LIFECYCLE_SOURCE, seq },
 			"clear-agent-authority",
+			"protected",
 			true,
 			false,
 			true,
@@ -447,6 +455,7 @@ export class PresenceClient {
 	private async requestBeforeDeadline(
 		line: string,
 		key: string,
+		lane: QueueLane,
 		priority: boolean,
 		timeoutMs: number,
 		preempt?: readonly string[],
@@ -454,7 +463,7 @@ export class PresenceClient {
 	): Promise<string> {
 		if (deadlineAt !== undefined && this.remaining(deadlineAt) <= 0)
 			throw new PresenceTransportError("Socket request timed out.");
-		const request = this.transport.request(line, key, priority, timeoutMs, preempt, deadlineAt);
+		const request = this.transport.request(line, key, priority, timeoutMs, preempt, deadlineAt, lane);
 		if (deadlineAt === undefined) return request;
 		const remaining = this.remaining(deadlineAt);
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -486,7 +495,7 @@ export class PresenceClient {
 		const seq = this.next();
 		if (seq === undefined) return;
 		let promise!: Promise<void>;
-		promise = this.send(method, { ...params, seq }, key, false, true, false, deadlineAt).then((acknowledged) => {
+		promise = this.send(method, { ...params, seq }, key, channel === "metadata" ? "replaceable" : "protected", false, true, false, deadlineAt).then((acknowledged) => {
 			if (acknowledged && this.ordinaryInFlight.get(channel)?.promise === promise)
 				this.ordinarySuccess.set(channel, { signature, acknowledgedAt: this.clock() });
 		}).finally(() => {
@@ -528,6 +537,9 @@ export class PresenceClient {
 					key,
 					false,
 					WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS,
+					undefined,
+					undefined,
+					"replaceable",
 				),
 				id,
 			);
@@ -544,6 +556,7 @@ export class PresenceClient {
 		method: HerdrMethod,
 		params: Record<string, unknown>,
 		key: string,
+		lane: QueueLane,
 		priority = false,
 		retry = true,
 		cleanup = false,
@@ -575,9 +588,10 @@ export class PresenceClient {
 				return this.requestBeforeDeadline(
 					line,
 					key,
+					lane,
 					priority,
 					Math.min(attemptTimeout, remaining),
-					cleanup ? undefined : WORKSPACE_OBSERVER_KEYS,
+					cleanup || lane === "actionable" ? undefined : WORKSPACE_OBSERVER_KEYS,
 					requestDeadlineAt,
 				);
 			};

@@ -208,8 +208,11 @@ async function exchange(
 	});
 }
 
+export type QueueLane = "protected" | "actionable" | "replaceable";
+
 interface Pending {
 	key?: string;
+	lane: QueueLane;
 	work: (signal: AbortSignal) => Promise<string>;
 	promise: Promise<string>;
 	resolve: (value: string) => void;
@@ -316,6 +319,7 @@ export class BoundedSocketQueue {
 		priority = false,
 		deadlineAt?: number,
 		preemptKeys?: readonly string[],
+		lane: QueueLane = "replaceable",
 	): Promise<string> {
 		if (this.closed)
 			return this.failed(new PresenceTransportError("Socket queue is closed."));
@@ -324,13 +328,57 @@ export class BoundedSocketQueue {
 		if (deadlineAt !== undefined && deadlineAt <= Date.now())
 			return this.failed(new PresenceTransportError("Socket request timed out."));
 
+		// Non-priority admission must reject before mutating an observer target.
+		// The active item is intentionally absent from `keyed`, so inspect both
+		// locations for shared-key conflicts and attempted observer preemption.
+		if (!priority) {
+			const active = this.active?.item;
+			const queued = key ? this.keyed.get(key) : undefined;
+			if (
+				key &&
+				((active?.key === key && active.lane !== lane) ||
+					(queued && queued.lane !== lane))
+			)
+				return this.failed(
+					new PresenceTransportError("Socket queue key lane conflict."),
+				);
+
+			// Actionable admission is queue-only and deliberately ignores supplied
+			// preemption keys. Other lanes can preempt workspace observers only.
+			if (lane !== "actionable") {
+				for (const preemptKey of preemptKeys ?? []) {
+					const activeTarget =
+						active?.key === preemptKey ? active : undefined;
+					const queuedTarget = this.keyed.get(preemptKey);
+					if (
+						(activeTarget && activeTarget.lane !== "replaceable") ||
+						(queuedTarget && queuedTarget.lane !== "replaceable")
+					)
+						return this.failed(
+							new PresenceTransportError(
+								"Socket queue preemption target lane conflict.",
+							),
+						);
+				}
+			}
+		}
+
 		// Reserve ordinary work synchronously with observer cancellation. The
 		// cancelled active exchange remains the physical queue owner until any
 		// unabortable fingerprint has settled, while this item is already ahead of
-		// observers that arrive after the preemption.
-		for (const preemptKey of preemptKeys ?? []) this.cancel(preemptKey);
+		// observers that arrive after the preemption. Priority cleanup explicitly
+		// bypasses this preflight and retains its established flush semantics.
+		for (const preemptKey of lane === "actionable" ? [] : (preemptKeys ?? []))
+			this.cancel(preemptKey);
 
 		const prior = key ? this.keyed.get(key) : undefined;
+		// Latest-write-wins is safe only within a lane. A lower-priority lane
+		// must not use a shared key to displace protected/actionable work.
+		// Priority cleanup intentionally retains its flush-all admission behavior.
+		if (prior && prior.lane !== lane && !priority)
+			return this.failed(
+				new PresenceTransportError("Socket queue key lane conflict."),
+			);
 		if (prior) {
 			const index = this.queue.indexOf(prior);
 			if (index >= 0) this.queue.splice(index, 1);
@@ -342,6 +390,7 @@ export class BoundedSocketQueue {
 		}
 
 		if (priority) {
+			// Cleanup remains the sole flush-all admission path.
 			for (const displaced of this.queue.splice(0)) {
 				if (displaced.key) this.keyed.delete(displaced.key);
 				this.reject(
@@ -352,7 +401,23 @@ export class BoundedSocketQueue {
 				);
 			}
 		} else if (this.queue.length >= this.limit) {
-			return this.failed(new PresenceTransportError("Socket queue is full."));
+			// Actionable notifications may make room for exactly one queued
+			// replaceable projection, but never abort active work or evict a
+			// protected/actionable request.
+			const replaceable = lane === "actionable"
+				? this.queue.findIndex((item) => item.lane === "replaceable")
+				: -1;
+			if (replaceable < 0)
+				return this.failed(new PresenceTransportError("Socket queue is full."));
+			const [displaced] = this.queue.splice(replaceable, 1);
+			if (displaced?.key) this.keyed.delete(displaced.key);
+			if (displaced)
+				this.reject(
+					displaced,
+					new PresenceTransportError(
+						"Socket queue displaced by actionable notification.",
+					),
+				);
 		}
 
 		let resolve!: Pending["resolve"];
@@ -365,6 +430,7 @@ export class BoundedSocketQueue {
 
 		const item: Pending = {
 			key,
+			lane,
 			work,
 			promise,
 			resolve,
@@ -490,6 +556,7 @@ export class HerdrSocketTransport {
 		preemptKeys?: readonly string[],
 		/** Optional caller-owned absolute deadline; relative callers remain compatible. */
 		deadlineAt = Date.now() + timeoutMs,
+		lane: QueueLane = "replaceable",
 	) {
 		const attemptStartedAt = Date.now();
 		// Preserve the caller's lifecycle boundary, while ensuring this queue entry
@@ -518,6 +585,7 @@ export class HerdrSocketTransport {
 			priority,
 			attemptDeadlineAt,
 			preemptKeys,
+			lane,
 		);
 	}
 

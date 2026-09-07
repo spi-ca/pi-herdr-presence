@@ -19,7 +19,7 @@ async function eventually(assertion: () => void): Promise<void> {
   throw failure;
 }
 
-test("deduped idle metadata leaves a saturated live projection best-effort behind an active agent report", async () => {
+test("an actionable terminal notification evicts queued replaceable metadata behind an active agent report", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-v2-live-order-"));
   const socketPath = join(directory, "socket");
   const requests: Request[] = [];
@@ -43,14 +43,15 @@ test("deduped idle metadata leaves a saturated live projection best-effort behin
     }
     return JSON.stringify({ id: request.id, result: {} });
   });
-  const runtime = new PresenceRuntime({ getAllTools: () => [], events } as never, { ...resolvePresenceConfig(), soleReporter: true, maxQueue: 1 });
+  const runtime = new PresenceRuntime({ getAllTools: () => [], events } as never, { ...resolvePresenceConfig(), soleReporter: true, maxQueue: 2 });
   let producer: ReturnType<typeof createPresenceProducer> | undefined;
   try {
     Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socketPath, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "absent") });
     for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) events.on(name, payload => runtime.handlePresenceEvent(name, payload));
     await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "session" } });
     // The final local idle projection is deliberately queued before the
-    // observer-only lease, which can defer under this one-slot transport.
+    // observer-only lease; this two-slot transport leaves room to prove that
+    // an actionable alert evicts metadata rather than a protected request.
     await eventually(() => expect(requests.filter(request => request.method === "pane.report_metadata").length).toBeGreaterThanOrEqual(2));
     requests.length = 0;
     live = true;
@@ -59,12 +60,14 @@ test("deduped idle metadata leaves a saturated live projection best-effort behin
     producer!.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting" });
     producer!.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
     await reportStartedPromise;
-    // The acknowledged idle projection was semantically suppressed, so this
-    // one-slot queue has no old metadata entry to replace. The changed live
-    // projection and terminal toast are both best-effort under saturation.
+    // The changed live metadata projection is replaceable. The terminal alert
+    // is actionable, so it evicts that one queued projection without aborting
+    // the active agent report.
     releaseReport();
-    await eventually(() => expect(requests.map(request => request.method)).toEqual(["pane.report_agent"]));
-    expect(requests.some(request => request.method === "notification.show")).toBe(false);
+    await eventually(() => expect(requests.map(request => request.method)).toEqual(["pane.report_agent", "notification.show"]));
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
+      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
+    ]);
   } finally {
     releaseReport?.();
     producer?.deactivate();
