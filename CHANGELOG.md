@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Nearby live failure-attention state and native/V2 input edges now arbitrate once to the fixed request-sound input alert in either arrival order when the input alert passes policy, dedupe, and rate admission. Retained failures no longer block a new input lifecycle, while rejected input, materially earlier already-notified failures, and failed terminal alerts remain separate.
 - Bounded socket admission now protects actionable error/input notifications by evicting at most one queued replaceable metadata, workspace, or success-info item; it never aborts active work or displaces protected lifecycle/session or actionable requests. Priority cleanup remains the only flush-all path.
 - Lifecycle start and shutdown now use one absolute configured timeout across authority-lane waiting and remote stages. Shutdown returns to Pi by that deadline while its reserved serialized cleanup later closes/releases ownership; expired startup and cleanup paths fence without new remote work.
 - Ordinary acknowledged `pane.report_agent` and `pane.report_metadata` projections now deduplicate complete wire semantics per client (excluding request IDs and sequence). Failed, malformed, stale, notification, session, workspace, and cleanup work remains retryable/live.

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { join } from "node:path";
 import {
 	EVENT_NAMES,
+	MAX_INTEGER,
 	createPresenceProducer,
 	type PresenceProducerHandle,
 	type PresenceSource,
@@ -310,7 +311,9 @@ serial(
 			);
 			s.publishState(failure(1));
 			await sleep(80);
-			expect(notices(requests)).toHaveLength(2);
+			// A failure accepted during this admitted aggregate input lifecycle is
+			// attached to it and therefore does not create a competing alert.
+			expect(notices(requests)).toHaveLength(1);
 			expect(
 				reports(requests).at(-1)?.params,
 			).toMatchObject({
@@ -330,6 +333,168 @@ serial(
 				}),
 			);
 		}),
+);
+serial(
+	"native failure then input then end retains the admitted input arbitration",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const context = (runtime as unknown as { context: object }).context;
+			producer("subagent").publishState(failure(1));
+			runtime.handleUiPromptStart(context);
+			runtime.handleUiPromptEnd(context);
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
+			expect("inputNotificationTimer" in (runtime as object)).toBe(false);
+		}),
+);
+serial(
+	"native input then failure then end retains the admitted input arbitration",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const context = (runtime as unknown as { context: object }).context;
+			runtime.handleUiPromptStart(context);
+			producer("subagent").publishState(failure(1));
+			runtime.handleUiPromptEnd(context);
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+		}),
+);
+serial(
+	"V2 failure then input then withdrawal retains the admitted input arbitration",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			const interaction = producer("interaction");
+			producer("subagent").publishState(failure(1));
+			interaction.publishState(input(1));
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+		}),
+);
+serial(
+	"V2 input then failure then withdrawal retains the admitted input arbitration",
+	async () =>
+		withRuntime({}, async ({ producer, requests }) => {
+			const interaction = producer("interaction");
+			interaction.publishState(input(1));
+			producer("subagent").publishState(failure(1));
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+		}),
+);
+serial(
+	"a retained failure already notified before a native prompt keeps its separate input alert",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			producer("subagent").publishState(failure(1));
+			await eventually(() => expect(notices(requests)).toHaveLength(1));
+			runtime.handleUiPromptStart((runtime as unknown as { context: object }).context);
+			await sleep(100);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual([
+				"Pi needs attention",
+				"Pi needs your input",
+			]);
+		}),
+);
+serial(
+	"failure withdrawal cannot cancel the nearby native input alert",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const subagent = producer("subagent");
+			subagent.publishState(failure(1));
+			runtime.handleUiPromptStart((runtime as unknown as { context: object }).context);
+			subagent.withdraw({ version: 2, generation: 1, sequence: 2, source: "subagent" });
+			await sleep(100);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual([
+				"Pi needs your input",
+			]);
+		}),
+);
+serial(
+	"rate-rejected input leaves a nearby failure eligible",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const rate = (runtime as unknown as { notificationRate: { accept(kind: "input" | "other"): boolean } }).notificationRate;
+			expect(rate.accept("input")).toBe(true);
+			for (let index = 0; index < 8; index += 1) expect(rate.accept("other")).toBe(true);
+			const interaction = producer("interaction");
+			interaction.publishState(input(1));
+			producer("subagent").publishState(failure(1));
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+		}),
+);
+serial(
+	"a rejected new input lifecycle cannot inherit the previous admission tombstone",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const interaction = producer("interaction");
+			interaction.publishState(input(1));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			const rate = (runtime as unknown as { notificationRate: { accept(kind: "other"): boolean } }).notificationRate;
+			for (let index = 0; index < 8; index += 1) expect(rate.accept("other")).toBe(true);
+			interaction.publishState(input(1, 2));
+			producer("subagent").publishState(failure(1));
+			interaction.withdraw({ version: 2, generation: 2, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
+		}),
+);
+serial(
+	"a queued failure remains bound to admitted A while rejected B owns its own failure",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const interaction = producer("interaction");
+			const subagent = producer("subagent");
+			// This failure arrives first, then is claimed by A when A begins.
+			subagent.publishState(failure(1));
+			interaction.publishState(input(1));
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			const rate = (runtime as unknown as { notificationRate: { accept(kind: "other"): boolean } }).notificationRate;
+			for (let index = 0; index < 8; index += 1) expect(rate.accept("other")).toBe(true);
+			// B is rejected. Its failure must bind to B, not inherit A's receipt.
+			interaction.publishState(input(1, 2));
+			subagent.publishState(failure(1, 2));
+			interaction.withdraw({ version: 2, generation: 2, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await sleep(30);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
+		}),
+);
+serial(
+	"input rejected by notify admission leaves a nearby failure eligible",
+	async () =>
+		withRuntime({}, async ({ runtime, producer, requests }) => {
+			const internal = runtime as unknown as {
+				notify(severity: string, key: string, title: string, body: string, origin: "local" | "external"): boolean;
+			};
+			const notify = internal.notify.bind(runtime);
+			internal.notify = (severity, key, title, body, origin) => severity === "attention" ? false : notify(severity, key, title, body, origin);
+			const interaction = producer("interaction");
+			interaction.publishState(input(1));
+			producer("subagent").publishState(failure(1));
+			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+		}),
+);
+serial(
+	"notification acceptance timestamps remain monotonic beyond the wire integer bound",
+	async () => {
+		let now = MAX_INTEGER + 1;
+		const runtime = new PresenceRuntime({ getAllTools: () => [], events: bus() } as never, { ...resolvePresenceConfig(), soleReporter: true }, undefined, () => now);
+		const internal = runtime as unknown as { nextNotificationAcceptanceTime(): number };
+		expect(internal.nextNotificationAcceptanceTime()).toBe(MAX_INTEGER + 1);
+		now += MAX_INTEGER + 1;
+		expect(internal.nextNotificationAcceptanceTime()).toBe((MAX_INTEGER + 1) * 2);
+	},
 );
 serial(
 	"metadata emits ten interaction and attention tokens",

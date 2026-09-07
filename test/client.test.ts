@@ -598,21 +598,59 @@ test("agent and metadata semantic caches are independent", async () => {
   expect(fake.requests.filter(request => request.method === "pane.report_metadata")).toHaveLength(3);
 });
 
-test("a notification transport failure after dispatch is not retried", async () => {
-  const requests: Request[] = [];
+test("notification response failures are contained without retrying or unhandled rejections", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    for (const response of [
+      () => "malformed response",
+      () => JSON.stringify({ id: "wrong", result: {} }),
+      (request: Request) => JSON.stringify({ id: request.id, error: { code: "denied", message: "notification rejected" } }),
+    ]) {
+      const requests: Request[] = [];
+      const presence = client({
+        async request(line: string, _key?: string, _priority?: boolean, _timeout?: number, _preempt?: readonly string[], _deadline?: number, _lane?: string, onAdmission?: (admitted: boolean) => void) {
+          const request = JSON.parse(line) as Request;
+          requests.push(request);
+          onAdmission?.(true);
+          return response(request);
+        },
+        cancel(_key: string) {},
+        async close() {},
+      });
+
+      expect(presence.notify("Pi needs attention", "A Pi task needs attention", true)).toBe(true);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({ method: "notification.show" });
+    }
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("fencing synchronously cancels outstanding notification keys", async () => {
+  const cancelled: string[] = [];
+  let settle!: () => void;
+  const pending = new Promise<string>((resolve) => { settle = () => resolve('{"id":"herdr:pi:1","result":{}}'); });
   const presence = client({
-    async request(line: string) {
-      requests.push(JSON.parse(line) as Request);
-      throw new Error("transport failed after dispatch");
+    request(_line: string, _key?: string, _priority?: boolean, _timeout?: number, _preempt?: readonly string[], _deadline?: number, _lane?: string, onAdmission?: (admitted: boolean) => void) {
+      onAdmission?.(true);
+      return pending;
     },
-    cancel(_key: string) {},
+    cancel(key: string) { cancelled.push(key); },
     async close() {},
   });
 
-  await presence.notify("Pi needs attention", "A Pi task needs attention", true);
-
-  expect(requests).toHaveLength(1);
-  expect(requests[0]).toMatchObject({ method: "notification.show" });
+  expect(presence.notify("Pi needs your input", "Pi needs your input", true, "input:1")).toBe(true);
+  presence.fenceOrdinaryOutput();
+  expect(cancelled).toContain("notification:input:1");
+  settle();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect((presence as unknown as { outstandingNotificationKeys: Map<string, number> }).outstandingNotificationKeys.size).toBe(0);
 });
 
 test("client assigns notification lanes and sounds from actionability", async () => {

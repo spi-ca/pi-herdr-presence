@@ -201,6 +201,9 @@ serial("pending native prompts are discarded on replacement and shutdown", async
     await runtime.shutdownSession(shutdownContext);
     await shutdownStart;
     expect(requests.some(request => request.method === "notification.show")).toBe(false);
+    expect((runtime as unknown as { pendingNotifications: unknown[]; inputLifecycles: unknown[] }).pendingNotifications).toEqual([]);
+    expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
+    expect("inputNotificationTimer" in (runtime as object)).toBe(false);
   } finally {
     await runtime.shutdownSession(activeContext(runtime));
     restore(saved);
@@ -469,7 +472,7 @@ serial("startup notification drain preserves external candidate arrival order", 
   }
 });
 
-serial("startup failure pairing uses acceptance time and preserves unpaired candidate order", async () => {
+serial("startup native failure/input ordering remains bounded at maxQueue=1", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-pairing-"));
   const socket = join(directory, "socket");
   const requests: Request[] = [];
@@ -485,8 +488,7 @@ serial("startup failure pairing uses acceptance time and preserves unpaired cand
   });
   const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
   const bus = makeBus();
-  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
-  const input = createPresenceProducer({ source: "interaction", emit: bus.events.emit })!;
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000, maxQueue: 1 });
   const subagent = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
   const delayed = createPresenceProducer({ source: "pi", emit: bus.events.emit })!;
   try {
@@ -494,12 +496,14 @@ serial("startup failure pairing uses acceptance time and preserves unpaired cand
     // Claim the external pi source before the runtime activates its local candidates.
     expect(delayed.activate()).toBe(true);
     registerPresenceHooks(bus as never, runtime);
-    const starting = runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
+    const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+    const starting = runtime.startSession(context);
     await seenReport;
-    for (const producer of [input, subagent]) expect(producer.activate()).toBe(true);
-    input.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } });
+    expect(subagent.activate()).toBe(true);
     subagent.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "error", attention: { reason: "failure", occurrence: "new" } });
-    subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
+    runtime.handleUiPromptStart(context);
+    // The failed terminal is a distinct edge; it must remain independent.
+    subagent.publishTerminal({ version: 2, generation: 2, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
     delayed.publishState({ version: 2, generation: 1, sequence: 1, source: "pi", state: "error", attention: { reason: "failure", occurrence: "new" } });
     await pause(30);
     delayed.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "pi", eventId: 1, outcome: "failed" });
@@ -508,16 +512,117 @@ serial("startup failure pairing uses acceptance time and preserves unpaired cand
     await starting;
     await pause();
 
+    // The native input suppresses only its nearby state failure. The distinct
+    // failed terminal remains independently eligible under the smallest queue.
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual([
       "Pi needs your input",
       "Pi needs attention",
-      "Pi needs attention",
-      "Pi needs attention",
-      "Pi activity completed",
     ]);
   } finally {
     releaseReport?.();
-    for (const producer of [input, subagent, delayed]) producer.deactivate();
+    for (const producer of [subagent, delayed]) producer.deactivate();
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("startup input admission survives withdrawal before a nearby failure", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-input-ended-failure-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let releaseReport!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  let reportSeen!: () => void;
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.report_agent") { reportSeen(); await reportGate; }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const interaction = createPresenceProducer({ source: "interaction", emit: bus.events.emit })!;
+  const subagent = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+    const starting = runtime.startSession(context);
+    await seenReport;
+    expect(interaction.activate()).toBe(true);
+    expect(subagent.activate()).toBe(true);
+    interaction.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } });
+    interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+    subagent.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "error", attention: { reason: "failure", occurrence: "new" } });
+    releaseReport();
+    await starting;
+    await pause(30);
+
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs your input"]);
+    expect((runtime as unknown as { failureArrivals: unknown[]; inputLifecycles: unknown[] }).failureArrivals).toEqual([]);
+    expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
+  } finally {
+    releaseReport?.();
+    interaction.deactivate();
+    subagent.deactivate();
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("startup rejected input lifecycle does not inherit an older admitted receipt", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-rejected-input-failure-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let releaseReport!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  let reportSeen!: () => void;
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.report_agent") { reportSeen(); await reportGate; }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const interaction = createPresenceProducer({ source: "interaction", emit: bus.events.emit })!;
+  const subagent = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const internal = runtime as unknown as { notify(severity: string, key: string, title: string, body: string, origin: "local" | "external"): boolean };
+    const notify = internal.notify.bind(runtime);
+    let inputAttempts = 0;
+    internal.notify = (severity, key, title, body, origin) => severity === "attention" && ++inputAttempts > 1 ? false : notify(severity, key, title, body, origin);
+    const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
+    const starting = runtime.startSession(context);
+    await seenReport;
+    expect(interaction.activate()).toBe(true);
+    expect(subagent.activate()).toBe(true);
+    interaction.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } });
+    interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
+    interaction.publishState({ version: 2, generation: 2, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 1 }, attention: { reason: "input_required", occurrence: "new" } });
+    interaction.withdraw({ version: 2, generation: 2, sequence: 2, source: "interaction" });
+    subagent.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "error", attention: { reason: "failure", occurrence: "new" } });
+    releaseReport();
+    await starting;
+    await pause(30);
+
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+    expect((runtime as unknown as { failureArrivals: unknown[]; inputLifecycles: unknown[] }).failureArrivals).toEqual([]);
+    expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
+  } finally {
+    releaseReport?.();
+    interaction.deactivate();
+    subagent.deactivate();
     await runtime.shutdownSession(activeContext(runtime));
     restore(saved);
     await server.close();

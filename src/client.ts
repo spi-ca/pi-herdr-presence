@@ -52,6 +52,8 @@ export class PresenceClient {
 	/** Successful ordinary projections only; cleanup and notifications always remain live. */
 	private ordinarySuccess = new Map<"agent" | "metadata", { signature: string; acknowledgedAt: number }>();
 	private ordinaryInFlight = new Map<"agent" | "metadata", { signature: string; promise: Promise<void> }>();
+	/** Notification work is cancellable synchronously at lifecycle fences. */
+	private outstandingNotificationKeys = new Map<string, number>();
 	constructor(
 		private readonly identity: HerdrIdentity,
 		private readonly transport: HerdrSocketTransport,
@@ -337,22 +339,72 @@ export class PresenceClient {
 			deadlineAt,
 		);
 	}
-	/** A visible toast has unknown delivery after dispatch, so it is never retried. */
-	async notify(
+	/**
+	 * A visible toast has unknown delivery after dispatch and is never retried.
+	 * The return value is only a synchronous queue-admission receipt; it is not
+	 * an acknowledgement from Herdr.
+	 */
+	notify(
 		title: string,
 		body: string,
 		actionable: boolean,
 		key = "default",
-	): Promise<void> {
-		if (!this.config.notifications) return;
-		await this.send(
-			"notification.show",
-			{ title, body, sound: actionable ? "request" : "done" },
-			`notification:${key}`,
+	): boolean {
+		if (!this.config.notifications || this.closed || this.closing) return false;
+		const id = `${this.metadataSource}:${++this.requestNumber}`;
+		let line: string;
+		try {
+			line = encodeHerdrRequest({
+				id,
+				method: "notification.show",
+				params: { title, body, sound: actionable ? "request" : "done" },
+			});
+		} catch {
+			return false;
+		}
+		let admitted = false;
+		let receivedAdmission = false;
+		const transportKey = `notification:${key}`;
+		let tracked = false;
+		const request = this.transport.request(
+			line,
+			transportKey,
+			false,
+			this.config.timeoutMs,
+			undefined,
+			undefined,
 			actionable ? "actionable" : "replaceable",
-			false,
-			false,
+			(value) => {
+				receivedAdmission = true;
+				admitted = value;
+				if (value) {
+					tracked = true;
+					this.outstandingNotificationKeys.set(
+						transportKey,
+						(this.outstandingNotificationKeys.get(transportKey) ?? 0) + 1,
+					);
+				}
+			},
 		);
+		// Once queued, delivery may fail after dispatch. Validate a settled response
+		// only for protocol containment; it must never alter admission or retry.
+		void request.then(
+			(response) => {
+				try {
+					decodeHerdrResponse(response, id);
+				} catch {
+					/* notification output is observer-only */
+				}
+			},
+			() => {},
+		).finally(() => {
+			if (!tracked) return;
+			const count = this.outstandingNotificationKeys.get(transportKey);
+			if (count === undefined || count <= 1)
+				this.outstandingNotificationKeys.delete(transportKey);
+			else this.outstandingNotificationKeys.set(transportKey, count - 1);
+		}).catch(() => {});
+		return receivedAdmission && admitted;
 	}
 	/** Herdr's existing authority clear is priority cleanup and is never retried. */
 	private async clearAgentAuthority(deadlineAt?: number): Promise<void> {
@@ -437,6 +489,7 @@ export class PresenceClient {
 	fenceOrdinaryOutput(): void {
 		this.closing = true;
 		this.pendingWorkspaceSummary = null;
+		this.cancelOutstandingNotifications();
 		this.cancelWorkspaceObservers();
 	}
 	async close(timeoutMs?: number): Promise<void> {
@@ -550,6 +603,9 @@ export class PresenceClient {
 	/** Shutdown fences observer work, while ordinary output reserves preemption atomically in transport. */
 	private cancelWorkspaceObservers(): void {
 		for (const key of WORKSPACE_OBSERVER_KEYS) this.transport.cancel(key);
+	}
+	private cancelOutstandingNotifications(): void {
+		for (const key of this.outstandingNotificationKeys.keys()) this.transport.cancel(key);
 	}
 	/** Lifecycle requests use two bounded attempts. */
 	private async send(
