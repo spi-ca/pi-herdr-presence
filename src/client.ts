@@ -28,6 +28,8 @@ const WORKSPACE_OBSERVER_KEYS = [
 	"workspace-pane-list",
 	"workspace-main-summary",
 ] as const;
+/** Re-send an unchanged successful projection periodically to repair Herdr restarts. */
+const ORDINARY_SUCCESS_TTL_MS = 5_000;
 /** Herdr's fixed session projection is intentionally ID-only; paths are never sent. */
 export type SessionRef = { agent_session_id: string };
 
@@ -41,14 +43,22 @@ export class PresenceClient {
 	private legacyMetadataClear: Promise<void> | null = null;
 	private startupMetadataClear: Promise<void> | null = null;
 	private sessionAuthorityPrepared = false;
+	/** A standalone session write may establish authority before any response. */
+	private sessionAuthorityAttempted = false;
+	private authorityClearAttempted = false;
 	private normalMetadataStarted = false;
 	private workspaceSummaryRequest: Promise<void> | null = null;
 	private pendingWorkspaceSummary: string | null = null;
+	/** Successful ordinary projections only; cleanup and notifications always remain live. */
+	private ordinarySuccess = new Map<"agent" | "metadata", { signature: string; acknowledgedAt: number }>();
+	private ordinaryInFlight = new Map<"agent" | "metadata", { signature: string; promise: Promise<void> }>();
 	constructor(
 		private readonly identity: HerdrIdentity,
 		private readonly transport: HerdrSocketTransport,
 		private readonly config: PresenceConfig,
 		private readonly mode: Exclude<PresenceMode, "disabled"> = "standalone",
+		/** Injectable only for deterministic projection-freshness tests. */
+		private readonly clock: () => number = Date.now,
 	) {}
 	private get companion(): boolean {
 		return this.mode === "companion";
@@ -56,10 +66,13 @@ export class PresenceClient {
 	private get metadataSource(): string {
 		return this.companion ? COMPANION_METADATA_SOURCE : LIFECYCLE_SOURCE;
 	}
-	async reportSession(sessionRef: SessionRef, reason?: string): Promise<void> {
-		if (this.companion) return;
+	async reportSession(sessionRef: SessionRef, reason?: string, deadlineAt?: number): Promise<void> {
+		if (this.companion || this.expired(deadlineAt)) return;
 		const seq = this.next();
 		if (seq === undefined) return;
+		// A valid write can establish server-side authority even if the response is
+		// lost or malformed. Conservatively reserve priority rollback before it.
+		this.sessionAuthorityAttempted = true;
 		await this.send(
 			"pane.report_agent_session",
 			{
@@ -73,50 +86,50 @@ export class PresenceClient {
 				...sessionRef,
 			},
 			"session",
+			false,
+			true,
+			false,
+			deadlineAt,
 		);
 	}
 	async report(
 		state: "idle" | "working" | "blocked" | "unknown",
 		sessionRef: SessionRef,
 		message?: string,
+		deadlineAt?: number,
 	): Promise<void> {
-		if (this.companion) return;
-		const seq = this.next();
-		if (seq === undefined) return;
-		await this.send(
-			"pane.report_agent",
-			{
-				pane_id: this.identity.paneId,
-				source: LIFECYCLE_SOURCE,
-				agent: "pi",
-				state,
-				...(message ? { message } : {}),
-				seq,
-				...sessionRef,
-			},
-			"agent",
-		);
+		if (this.companion || this.expired(deadlineAt)) return;
+		const params = {
+			pane_id: this.identity.paneId,
+			source: LIFECYCLE_SOURCE,
+			agent: "pi",
+			state,
+			...(message ? { message } : {}),
+			seq: 0,
+			...sessionRef,
+		};
+		await this.ordinary("agent", "pane.report_agent", params, "agent", deadlineAt);
 	}
 	/** Herdr v8 renders fixed display fields, a summary-derived title, and the complete V2 token patch. */
 	async metadata(
 		presentation: HerdrPresentation,
 		tokens: HerdrMetadataTokens,
+		deadlineAt?: number,
 	): Promise<void> {
-		if (!this.config.metadata) return;
+		if (!this.config.metadata || this.expired(deadlineAt)) return;
 		// Await only incomplete startup work. Once its successful completion is
 		// recorded, a live metadata edge must enter the transport queue in this
 		// call stack, ahead of any following best-effort notification.
-		const preparation = this.prepareSessionAuthority();
+		const preparation = this.prepareSessionAuthority(deadlineAt);
 		if (!this.sessionAuthorityPrepared) await preparation;
+		if (this.expired(deadlineAt)) return;
 		this.normalMetadataStarted = true;
-		const seq = this.next();
-		if (seq === undefined) return;
 		const params = this.companion
 			? {
 					pane_id: this.identity.paneId,
 					source: this.metadataSource,
 					applies_to_source: LIFECYCLE_SOURCE,
-					seq,
+					seq: 0,
 					title: titleForSummary(tokens.summary),
 					display_agent: presentation.displayAgent,
 					state_labels: presentation.labels,
@@ -127,38 +140,38 @@ export class PresenceClient {
 					source: LIFECYCLE_SOURCE,
 					applies_to_source: LIFECYCLE_SOURCE,
 					agent: "pi",
-					seq,
+					seq: 0,
 					title: titleForSummary(tokens.summary),
 					display_agent: presentation.displayAgent,
 					state_labels: presentation.labels,
 					tokens,
 				};
-		await this.send("pane.report_metadata", params, "metadata");
+		await this.ordinary("metadata", "pane.report_metadata", params, "metadata", deadlineAt);
 	}
 	/**
 	 * Clear both owned V2 chunks before this client restores pane authority.
 	 * They are separate exact requests because the legacy chunk has 12 keys and
 	 * the current chunk has 10, preserving the 16-token request bound.
 	 */
-	prepareSessionAuthority(): Promise<void> {
-		if (this.sessionAuthorityPrepared || this.normalMetadataStarted)
+	prepareSessionAuthority(deadlineAt?: number): Promise<void> {
+		if (this.sessionAuthorityPrepared || this.normalMetadataStarted || this.expired(deadlineAt))
 			return Promise.resolve();
 		if (!this.startupMetadataClear)
 			this.startupMetadataClear = (async () => {
-				await this.clearCurrentMetadata("metadata-startup-clear", false);
-				if (!this.companion) await this.clearLegacyMetadata();
-				this.sessionAuthorityPrepared = true;
+				await this.clearCurrentMetadata("metadata-startup-clear", false, deadlineAt);
+				if (!this.companion && !this.expired(deadlineAt)) await this.clearLegacyMetadata(deadlineAt);
+				if (!this.expired(deadlineAt)) this.sessionAuthorityPrepared = true;
 			})();
 		return this.startupMetadataClear;
 	}
 	/** Clear pre-V2-only owned tokens once before normal presentation; it never retries. */
-	clearLegacyMetadata(): Promise<void> {
-		if (this.companion) return Promise.resolve();
+	clearLegacyMetadata(deadlineAt?: number): Promise<void> {
+		if (this.companion || this.expired(deadlineAt)) return Promise.resolve();
 		if (this.normalMetadataStarted || this.legacyMetadataClear)
 			return this.legacyMetadataClear ?? Promise.resolve();
 		const seq = this.next();
 		if (seq === undefined) return Promise.resolve();
-		this.legacyMetadataClear = this.send(
+		const clear = this.send(
 			"pane.report_metadata",
 			{
 				pane_id: this.identity.paneId,
@@ -174,8 +187,10 @@ export class PresenceClient {
 			false,
 			false,
 			true,
-		);
-		return this.legacyMetadataClear;
+			deadlineAt,
+		).then(() => {});
+		this.legacyMetadataClear = clear;
+		return clear;
 	}
 	/** Publish a leased workspace summary only when this is the sole reported Pi pane in its opaque workspace. */
 	async workspaceMainSummary(summary: string): Promise<void> {
@@ -258,10 +273,11 @@ export class PresenceClient {
 		}
 	}
 	/** Explicitly clear every owned presentation field and null every fixed token. */
-	async clearMetadata(): Promise<void> {
-		await this.clearCurrentMetadata("metadata-clear");
+	async clearMetadata(deadlineAt?: number): Promise<void> {
+		await this.clearCurrentMetadata("metadata-clear", true, deadlineAt);
 	}
-	private async clearCurrentMetadata(key: string, retry = true): Promise<void> {
+	private async clearCurrentMetadata(key: string, retry = true, deadlineAt?: number): Promise<void> {
+		if (this.expired(deadlineAt)) return;
 		const seq = this.next();
 		if (seq === undefined) return;
 		const tokens = Object.fromEntries(
@@ -289,11 +305,11 @@ export class PresenceClient {
 					clear_state_labels: true,
 					tokens,
 				};
-		await this.send("pane.report_metadata", params, key, true, retry, true);
+		await this.send("pane.report_metadata", params, key, true, retry, true, deadlineAt);
 	}
 	/** Teardown repeats the exact legacy chunk only for standalone ownership. */
-	private async clearLegacyMetadataOnTeardown(): Promise<void> {
-		if (this.companion) return;
+	private async clearLegacyMetadataOnTeardown(deadlineAt?: number): Promise<void> {
+		if (this.companion || this.expired(deadlineAt)) return;
 		const seq = this.next();
 		if (seq === undefined) return;
 		await this.send(
@@ -312,6 +328,7 @@ export class PresenceClient {
 			true,
 			false,
 			true,
+			deadlineAt,
 		);
 	}
 	/** A visible toast has unknown delivery after dispatch, so it is never retried. */
@@ -331,7 +348,9 @@ export class PresenceClient {
 		);
 	}
 	/** Herdr's existing authority clear is priority cleanup and is never retried. */
-	private async clearAgentAuthority(): Promise<void> {
+	private async clearAgentAuthority(deadlineAt?: number): Promise<void> {
+		if (this.authorityClearAttempted || this.expired(deadlineAt)) return;
+		this.authorityClearAttempted = true;
 		const seq = this.next();
 		if (seq === undefined) return;
 		await this.send(
@@ -341,46 +360,55 @@ export class PresenceClient {
 			true,
 			false,
 			true,
+			deadlineAt,
 		);
 	}
-	/** Clear metadata then authority within one deadline; expiry aborts later dispatch. */
+	/** Roll back attempted standalone authority first, then clear presentation within one deadline. */
 	teardown(timeoutMs = this.config.timeoutMs): Promise<void> {
+		const budget = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : this.config.timeoutMs;
+		return this.teardownUntil(Date.now() + budget);
+	}
+	teardownUntil(deadlineAt: number): Promise<void> {
 		if (this.teardownPromise) return this.teardownPromise;
 		if (this.closed) return Promise.resolve();
-		// Fence ordinary reports and their retries before cleanup enters the queue.
 		this.fenceOrdinaryOutput();
-		this.teardownPromise = this.performTeardown(timeoutMs);
+		this.teardownPromise = this.performTeardown(deadlineAt);
 		return this.teardownPromise;
 	}
-	private async performTeardown(timeoutMs: number): Promise<void> {
-		const budget = Number.isFinite(timeoutMs)
-			? Math.max(0, timeoutMs)
-			: this.config.timeoutMs;
-		if (budget <= 0) {
+	private async performTeardown(deadlineAt: number): Promise<void> {
+		if (this.expired(deadlineAt)) {
 			await this.close(0).catch(() => {});
 			return;
 		}
-		const deadlineAt = Date.now() + budget;
 		let expired = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const expires = new Promise<void>((resolve) => {
+			const remaining = this.remaining(deadlineAt);
 			timer = setTimeout(() => {
 				expired = true;
 				void this.close(0).catch(() => {});
 				resolve();
-			}, budget);
+			}, remaining);
 			timer.unref?.();
 		});
 		try {
-			await Promise.race([this.clearMetadata().catch(() => {}), expires]);
+			// Session authority can outlive a lost, malformed, or acknowledged startup
+			// response. Roll it back before presentation cleanup consumes the reserve.
+			if (!this.companion && this.sessionAuthorityAttempted)
+				await Promise.race([
+					this.clearAgentAuthority(deadlineAt).catch(() => {}),
+					expires,
+				]);
+			if (!expired && !this.closed)
+				await Promise.race([this.clearMetadata(deadlineAt).catch(() => {}), expires]);
 			if (!expired && !this.closed && !this.companion)
 				await Promise.race([
-					this.clearLegacyMetadataOnTeardown().catch(() => {}),
+					this.clearLegacyMetadataOnTeardown(deadlineAt).catch(() => {}),
 					expires,
 				]);
 			if (!expired && !this.closed && !this.companion)
 				await Promise.race([
-					this.clearAgentAuthority().catch(() => {}),
+					this.clearAgentAuthority(deadlineAt).catch(() => {}),
 					expires,
 				]);
 			const remaining = deadlineAt - Date.now();
@@ -407,6 +435,70 @@ export class PresenceClient {
 		this.fenceOrdinaryOutput();
 		this.closed = true;
 		await this.transport.close(timeoutMs);
+	}
+	private remaining(deadlineAt?: number): number {
+		if (deadlineAt === undefined) return this.config.timeoutMs;
+		const remaining = deadlineAt - Date.now();
+		return Number.isFinite(remaining) ? Math.max(0, remaining) : 0;
+	}
+	private expired(deadlineAt?: number): boolean {
+		return deadlineAt !== undefined && this.remaining(deadlineAt) <= 0;
+	}
+	private async requestBeforeDeadline(
+		line: string,
+		key: string,
+		priority: boolean,
+		timeoutMs: number,
+		preempt?: readonly string[],
+		deadlineAt?: number,
+	): Promise<string> {
+		if (deadlineAt !== undefined && this.remaining(deadlineAt) <= 0)
+			throw new PresenceTransportError("Socket request timed out.");
+		const request = this.transport.request(line, key, priority, timeoutMs, preempt, deadlineAt);
+		if (deadlineAt === undefined) return request;
+		const remaining = this.remaining(deadlineAt);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([request, new Promise<string>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new PresenceTransportError("Socket request timed out.")), remaining);
+				timer.unref?.();
+			})]);
+		} finally { if (timer) clearTimeout(timer); }
+	}
+	private async ordinary(
+		channel: "agent" | "metadata",
+		method: Extract<HerdrMethod, "pane.report_agent" | "pane.report_metadata">,
+		params: Record<string, unknown>,
+		key: string,
+		deadlineAt?: number,
+	): Promise<void> {
+		let signature: string;
+		try { signature = semanticSignature(method, params); } catch { return; }
+		const acknowledged = this.ordinarySuccess.get(channel);
+		if (acknowledged?.signature === signature && this.successIsFresh(acknowledged.acknowledgedAt)) return;
+		const pending = this.ordinaryInFlight.get(channel);
+		if (pending?.signature === signature) return pending.promise;
+		// A newer distinct desired projection invalidates an older acknowledged
+		// value; a later stale failure never mutates this success cache.
+		this.ordinarySuccess.delete(channel);
+		if (this.expired(deadlineAt)) return;
+		// Do not allocate a sequence after a semantic cache or in-flight hit.
+		const seq = this.next();
+		if (seq === undefined) return;
+		let promise!: Promise<void>;
+		promise = this.send(method, { ...params, seq }, key, false, true, false, deadlineAt).then((acknowledged) => {
+			if (acknowledged && this.ordinaryInFlight.get(channel)?.promise === promise)
+				this.ordinarySuccess.set(channel, { signature, acknowledgedAt: this.clock() });
+		}).finally(() => {
+			if (this.ordinaryInFlight.get(channel)?.promise === promise)
+				this.ordinaryInFlight.delete(channel);
+		});
+		this.ordinaryInFlight.set(channel, { signature, promise });
+		return promise;
+	}
+	private successIsFresh(acknowledgedAt: number): boolean {
+		const age = this.clock() - acknowledgedAt;
+		return Number.isFinite(age) && age >= 0 && age < ORDINARY_SUCCESS_TTL_MS;
 	}
 	private next(): number | undefined {
 		try {
@@ -455,38 +547,43 @@ export class PresenceClient {
 		priority = false,
 		retry = true,
 		cleanup = false,
-	): Promise<void> {
-		if (this.closed || (this.closing && !cleanup)) return;
+		deadlineAt?: number,
+	): Promise<boolean> {
+		if (this.closed || (this.closing && !cleanup) || this.expired(deadlineAt)) return false;
 		const revision = (this.keyRevisions.get(key) ?? 0) + 1;
 		this.keyRevisions.set(key, revision);
 		const id = `${this.metadataSource}:${++this.requestNumber}`;
 		// This deadline starts before transport preemption. An unabortable observer
 		// fingerprint may delay dispatch, but can never extend lifecycle output.
-		const deadlineAt = Date.now() + this.config.timeoutMs;
+		const now = Date.now();
+		const requestDeadlineAt = deadlineAt ?? (Number.isFinite(now) ? now + this.config.timeoutMs : undefined);
 		try {
 			let line: string;
 			// Validation and serialization are output-only too: never dispatch or reject lifecycle work.
 			try {
 				line = encodeHerdrRequest({ id, method, params });
 			} catch {
-				return;
+				return false;
 			}
-			const firstTimeout = Math.max(1, Math.floor(this.config.timeoutMs / 2));
-			const retryTimeout = Math.max(0, this.config.timeoutMs - firstTimeout);
+			const totalRemaining = requestDeadlineAt === undefined ? this.config.timeoutMs : this.remaining(requestDeadlineAt);
+			const firstTimeout = Math.max(1, Math.floor(totalRemaining / 2));
+			const retryTimeout = Math.max(0, totalRemaining - firstTimeout);
 			const request = async (attemptTimeout: number): Promise<string> => {
-				const remaining = deadlineAt - Date.now();
+				const remaining = requestDeadlineAt === undefined ? this.config.timeoutMs : this.remaining(requestDeadlineAt);
 				if (attemptTimeout <= 0 || remaining <= 0)
 					throw new PresenceTransportError("Socket request timed out.");
-				return this.transport.request(
+				return this.requestBeforeDeadline(
 					line,
 					key,
 					priority,
 					Math.min(attemptTimeout, remaining),
 					cleanup ? undefined : WORKSPACE_OBSERVER_KEYS,
+					requestDeadlineAt,
 				);
 			};
 			try {
 				decodeHerdrResponse(await request(firstTimeout), id);
+				return true;
 			} catch (error) {
 				// Transport does not distinguish pre-dispatch failures from timeout/EOF.
 				if (
@@ -499,11 +596,12 @@ export class PresenceClient {
 							error.message,
 						))
 				)
-					return;
+					return false;
 				try {
 					decodeHerdrResponse(await request(retryTimeout), id);
+					return true;
 				} catch {
-					/* output-only best effort */
+					return false;
 				}
 			}
 		} finally {
@@ -513,6 +611,18 @@ export class PresenceClient {
 				this.keyRevisions.delete(key);
 		}
 	}
+}
+
+/** Canonical wire semantics deliberately exclude generated request id and sequence. */
+function semanticSignature(method: string, params: Record<string, unknown>): string {
+	const { seq: _sequence, ...semantics } = params;
+	return `${method}:${stableJson(semantics)}`;
+}
+function stableJson(value: unknown): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+	const record = value as Record<string, unknown>;
+	return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
 }
 
 function safeSessionStartReason(reason: unknown): reason is string {

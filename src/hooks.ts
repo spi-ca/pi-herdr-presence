@@ -6,7 +6,7 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
  for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) pi.events.on(name,payload=>runtime.handlePresenceEvent(name,payload));
  pi.events.on(EVENT_NAMES.consumerReady,payload=>runtime.handleConsumerReady(payload));
  pi.on("agent_settled", (_event, context) => runtime.handleAgentSettled(context));
- // Lifecycle callbacks are observer-only: never make Pi await probe or socket work.
+ // Startup stays detached; shutdown returns bounded cleanup for Pi to await.
  pi.on("session_start", (event, context) => { void runtime.startSession(context, event).catch(() => {}); });
  pi.on("agent_start", (_event, context) => runtime.handleAgentStart(context));
  pi.on("turn_start", (_event, context) => runtime.handleTurnStart(context));
@@ -15,5 +15,5 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
  pi.on("tool_result", (event, context) => runtime.handleToolResult(event, context));
  pi.on("ui_prompt_start", (_event, context) => runtime.handleUiPromptStart(context));
  pi.on("ui_prompt_end", (_event, context) => runtime.handleUiPromptEnd(context));
- pi.on("session_shutdown", (_event, context) => { void runtime.shutdownSession(context).catch(() => {}); });
+ pi.on("session_shutdown", (_event, context) => runtime.shutdownSession(context).catch(() => {}));
 }

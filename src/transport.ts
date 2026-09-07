@@ -29,6 +29,7 @@ async function exchange(
 	endpoint: string,
 	line: string,
 	timeoutMs: number,
+	deadlineAt?: number,
 	signal?: AbortSignal,
 	fingerprint: (
 		candidate: string,
@@ -37,8 +38,12 @@ async function exchange(
 	if (signal?.aborted) {
 		throw new PresenceTransportError("Socket request aborted.");
 	}
+	if (timeoutMs <= 0 || (deadlineAt !== undefined && deadlineAt <= Date.now())) {
+		throw new PresenceTransportError("Socket request timed out.");
+	}
 
 	return await new Promise((resolve, reject) => {
+		const expired = () => deadlineAt !== undefined && deadlineAt <= Date.now();
 		let buffer = "";
 		let done = false;
 		let postConnectValidated = false;
@@ -95,8 +100,10 @@ async function exchange(
 
 		void (async () => {
 			try {
+				if (expired()) return finish(new PresenceTransportError("Socket request timed out."));
 				const before = await fingerprintStage();
 				if (done || signal?.aborted) return abort();
+				if (expired()) return finish(new PresenceTransportError("Socket request timed out."));
 
 				socket = net.createConnection({ path: endpoint });
 				socket.setEncoding("utf8");
@@ -151,9 +158,11 @@ async function exchange(
 				socket.once("connect", async () => {
 					try {
 						if (done || signal?.aborted) return abort();
+						if (expired()) return finish(new PresenceTransportError("Socket request timed out."));
 
 						const after = await fingerprintStage();
 						if (done || signal?.aborted) return abort();
+						if (expired()) return finish(new PresenceTransportError("Socket request timed out."));
 						if (
 							before.dev !== after.dev ||
 							before.ino !== after.ino ||
@@ -166,6 +175,11 @@ async function exchange(
 						}
 
 						postConnectValidated = true;
+						// The post-connect fingerprint can consume the entire attempt.
+						// Recheck at the dispatch boundary: a timed-out request must not
+						// become ambiguous by writing after its deadline.
+						if (expired())
+							return finish(new PresenceTransportError("Socket request timed out."));
 						writeDispatched = true;
 						socket?.write(line, (error) => {
 							if (error)
@@ -305,6 +319,10 @@ export class BoundedSocketQueue {
 	): Promise<string> {
 		if (this.closed)
 			return this.failed(new PresenceTransportError("Socket queue is closed."));
+		// Reject before preemption, coalescing, allocation, or drain scheduling so
+		// an expired lifecycle deadline can never start remote work.
+		if (deadlineAt !== undefined && deadlineAt <= Date.now())
+			return this.failed(new PresenceTransportError("Socket request timed out."));
 
 		// Reserve ordinary work synchronously with observer cancellation. The
 		// cancelled active exchange remains the physical queue owner until any
@@ -470,20 +488,35 @@ export class HerdrSocketTransport {
 		priority = false,
 		timeoutMs = this.timeoutMs,
 		preemptKeys?: readonly string[],
+		/** Optional caller-owned absolute deadline; relative callers remain compatible. */
+		deadlineAt = Date.now() + timeoutMs,
 	) {
-		const deadlineAt = Date.now() + timeoutMs;
+		const attemptStartedAt = Date.now();
+		// Preserve the caller's lifecycle boundary, while ensuring this queue entry
+		// cannot consume a later retry's share of that lifecycle budget.
+		const attemptDeadlineAt = Math.min(deadlineAt, attemptStartedAt + timeoutMs);
+		if (!Number.isFinite(attemptDeadlineAt) || attemptDeadlineAt <= attemptStartedAt) {
+			const failed = Promise.reject<string>(new PresenceTransportError("Socket request timed out."));
+			void failed.catch(() => {});
+			return failed;
+		}
 		return this.queue.enqueue(
-			(signal) =>
-				exchange(
+			(signal) => {
+				const remaining = attemptDeadlineAt - Date.now();
+				if (remaining <= 0)
+					return Promise.reject(new PresenceTransportError("Socket request timed out."));
+				return exchange(
 					this.endpoint,
 					line,
-					Math.max(0, deadlineAt - Date.now()),
+					remaining,
+					attemptDeadlineAt,
 					signal,
 					this.fingerprint,
-				),
+				);
+			},
 			key,
 			priority,
-			deadlineAt,
+			attemptDeadlineAt,
 			preemptKeys,
 		);
 	}

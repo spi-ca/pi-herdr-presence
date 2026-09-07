@@ -68,7 +68,7 @@ const exactPresentation = (value: unknown): value is Record<string, unknown> => 
  && value.working === HERDR_FIXED_PRESENTATION.labels.working
  && value.blocked === HERDR_FIXED_PRESENTATION.labels.blocked
  && value.unknown === HERDR_FIXED_PRESENTATION.labels.unknown;
-type SummaryParts = { state: string; progress?: string; running?: string; queued?: string; pending?: string; terminal?: "completed" | "cancelled" | "failed" };
+type SummaryParts = { state: string; progress?: string; running?: string; stopping?: string; queued?: string; pending?: string; terminal?: "completed" | "cancelled" | "failed" };
 /** Parse the fixed-order summary grammar so its derived fields can be checked against their source tokens. */
 const parseSummary = (value: unknown): SummaryParts | undefined => {
  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 80) return undefined;
@@ -77,8 +77,9 @@ const parseSummary = (value: unknown): SummaryParts | undefined => {
  if (!statePart || !["idle", "working", "blocked", "input", "unknown"].includes(statePart)) return undefined;
  const result: SummaryParts = { state: statePart };
  if (parts[0]?.includes("/")) { const progress = parts.shift(); if (!canonicalProgress(progress)) return undefined; result.progress = progress; }
- if (parts[0]?.startsWith("running ")) { const running = parts.shift()?.slice("running ".length); if (!canonicalInteger(running)) return undefined; result.running = running; }
- if (parts[0]?.startsWith("queued ")) { const queued = parts.shift()?.slice("queued ".length); if (!canonicalInteger(queued)) return undefined; result.queued = queued; }
+ if (parts[0]?.startsWith("running ")) { const running = parts.shift()?.slice("running ".length); if (!canonicalInteger(running, 1)) return undefined; result.running = running; }
+ if (parts[0]?.startsWith("stopping ")) { const stopping = parts.shift()?.slice("stopping ".length); if (!canonicalInteger(stopping, 1)) return undefined; result.stopping = stopping; }
+ if (parts[0]?.startsWith("queued ")) { const queued = parts.shift()?.slice("queued ".length); if (!canonicalInteger(queued, 1)) return undefined; result.queued = queued; }
  if (parts[0]?.startsWith("input ")) { const pending = parts.shift()?.slice("input ".length); if (!canonicalInteger(pending)) return undefined; result.pending = pending; }
  if (parts[0]?.startsWith("terminal ")) {
   const terminal = parts.shift()?.slice("terminal ".length);
@@ -100,14 +101,15 @@ const exactMetadataTokens = (value: unknown): value is HerdrMetadataTokens => {
  // Summary is a derived projection, not an independently supplied display string.
  if (tokens.v2_progress === null ? summary.progress !== undefined : summary.progress !== undefined && summary.progress !== tokens.v2_progress) return false;
  if (tokens.v2_subagents === null) {
-  if (summary.running !== undefined || summary.queued !== undefined) return false;
+  if (summary.running !== undefined || summary.stopping !== undefined || summary.queued !== undefined) return false;
  } else {
-  const [running, , queued] = tokens.v2_subagents.split(",");
+  const [running, cancelling, queued] = tokens.v2_subagents.split(",");
   if (summary.running !== undefined && summary.running !== running) return false;
+  if (summary.stopping !== undefined && summary.stopping !== cancelling) return false;
   if (summary.queued !== undefined && summary.queued !== queued) return false;
  }
  if (tokens.v2_interaction === null) {
-  if (summary.state === "input" || summary.pending !== undefined) return false;
+  if (summary.pending !== undefined) return false;
  } else {
   const pending = tokens.v2_interaction.slice("ask_user:".length);
   if (summary.state !== "input" || summary.pending !== pending) return false;

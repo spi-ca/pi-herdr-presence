@@ -142,6 +142,28 @@ describe("transport integration: real Unix sockets", () => {
 		await transport.close();
 	});
 
+	test("uses each attempt deadline instead of consuming a later retry's lifecycle reserve", async () => {
+		const path = await temporarySocketPath("attempt-deadline");
+		let requests = 0;
+		await listen(path, (socket) =>
+			readRequest(socket, () => {
+				requests += 1;
+				if (requests === 2) socket.end("ok\n");
+			}),
+		);
+
+		const transport = new HerdrSocketTransport(path, 100, 1, fixedFingerprint);
+		const lifecycleDeadline = Date.now() + 500;
+		await expect(
+			transport.request("first\n", undefined, false, 20, undefined, lifecycleDeadline),
+		).rejects.toThrow("timed out");
+		await expect(
+			transport.request("retry\n", undefined, false, 100, undefined, lifecycleDeadline),
+		).resolves.toBe("ok");
+		expect(requests).toBe(2);
+		await transport.close();
+	});
+
 	test("recovers with a later request after a socket-level EOF failure", async () => {
 		const path = await temporarySocketPath("recovery");
 		let connections = 0;
@@ -227,6 +249,20 @@ describe("transport integration: real Unix sockets", () => {
 });
 
 describe("transport module: queue and deadline behavior", () => {
+	test("rejects an already expired deadline before scheduling work", async () => {
+		const queue = new BoundedSocketQueue(1);
+		let started = false;
+		await expect(
+			queue.enqueue(async () => {
+				started = true;
+				return "late";
+			}, undefined, false, Date.now()),
+		).rejects.toThrow("timed out");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(started).toBe(false);
+		await queue.close();
+	});
+
 	test("continues FIFO dispatch after an active request fails", async () => {
 		const queue = new BoundedSocketQueue(2);
 		const started: string[] = [];
