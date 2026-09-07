@@ -92,6 +92,49 @@ serial("a live edge during the stalled initial report gets latest metadata befor
   }
 });
 
+serial("startup correlation preserves accepted times rather than its delayed drain time", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-failure-correlation-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let releaseReport!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  let reportSeen!: () => void;
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    if (request.method === "pane.report_agent") { reportSeen(); await reportGate; }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const producer = createPresenceProducer({ source: "subagent", emit: bus.events.emit })!;
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "root" } });
+    await seenReport;
+    expect(producer.activate()).toBe(true);
+    producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "error", attention: { reason: "failure", occurrence: "new" } });
+    await pause(20);
+    producer.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
+    // The output gate remains closed longer than the correlation horizon.
+    await pause(120);
+    releaseReport();
+    await starting;
+    await pause(40);
+    expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
+  } finally {
+    releaseReport?.();
+    producer.deactivate();
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 serial("an acknowledged session authority is priority-cleared after startup projection expiry", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-authority-rollback-"));
   const socket = join(directory, "socket");

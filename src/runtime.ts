@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPresenceConsumer, createPresenceProducer, encodeTerminalBatch, MAX_INTEGER, type PresenceConsumerHandle, type PresenceEventV2, type PresenceProducerHandle, type PresenceStateInputV2, type PresenceStateV2, type PresenceTerminalV2, type TerminalBatch } from "@pi/presence";
 import { PresenceClient, type SessionRef } from "./client.js";
 import { resolvePresenceMode, type PresenceConfig, type PresenceMode } from "./config.js";
+import { FailureCorrelation } from "./failure-correlation.js";
 import { readHerdrIdentity } from "./identity.js";
 import { ExternalAttentionTransitions, NotificationDeduper, NotificationRateLimiter, shouldNotify, type NotificationCooldownKind, type NotificationSeverity } from "./notification-policy.js";
 import { officialHookStatus } from "./official-hook.js";
@@ -25,8 +26,8 @@ const MAX_PENDING_LIFECYCLE_EDGES = 64;
 /** Live notification edges received after activation cannot grow an unbounded startup backlog. */
 const MAX_PENDING_NOTIFICATION_CANDIDATES = 64;
 const MAX_DERIVED_USAGE = 1_000_000;
-/** A bounded synchronous producer terminal/state pair has no reason to outlive one tick. */
-const FAILURE_PAIR_WINDOW_MS = 10;
+/** Input arbitration remains synchronous; semantic failure correlation has its own 100ms horizon. */
+const INPUT_FAILURE_WINDOW_MS = 10;
 const EXTERNAL_NOTIFICATION_COALESCE_MS = 50;
 /** Startup must reach a stable aggregate snapshot before any observer-visible output opens. */
 const MAX_STARTUP_PROJECTION_PASSES = 16;
@@ -34,7 +35,7 @@ type SessionManagerProvider = { getSessionId?: () => unknown };
 type ContextUsageProvider = { getContextUsage?: () => unknown; isIdle?: () => boolean; sessionManager?: SessionManagerProvider };
 type Terminal = "success" | "error" | "cancelled";
 type LocalSource = "pi" | "todo";
-type FailureArrival = { source: string; generation: number; kind: "state" | "terminal"; acceptedAt: number; expiresAt: number; inputLifecycleId?: number; timer?: ReturnType<typeof setTimeout>; notify?: () => void };
+type FailureArrival = { source: string; generation: number; acceptedAt: number; expiresAt: number; inputLifecycleId?: number; timer?: ReturnType<typeof setTimeout>; notify?: () => void };
 type InputLifecycle = { id: number; acceptedAt: number; endedAt?: number; expiresAt?: number; attempted: boolean; admitted: boolean; purgeTimer?: ReturnType<typeof setTimeout> };
 type RuntimeSession = { id: string; ref: SessionRef; manager: SessionManagerProvider };
 type DerivedUsage = { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number; cost?: number };
@@ -49,8 +50,8 @@ type PendingLifecycleEdge =
 type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean; nativePromptWaiting: boolean; nativePromptAcceptedAt: number | null };
 type PendingNotificationCandidate =
   | { kind: "input"; acceptedAt: number }
-  | { kind: "state"; event: PresenceStateV2; inputPresent: boolean; acceptedAt: number }
-  | { kind: "terminal"; event: PresenceTerminalV2; acceptedAt: number }
+  | { kind: "state"; event: PresenceStateV2; inputPresent: boolean; acceptedAt: number; failureKey?: string }
+  | { kind: "terminal"; event: PresenceTerminalV2; acceptedAt: number; failureKey?: string }
   | { kind: "withdraw"; inputPresent: boolean; acceptedAt: number };
 
 function sessionManager(context: unknown): SessionManagerProvider | null {
@@ -201,7 +202,9 @@ export class PresenceRuntime {
   private notifications = new NotificationDeduper();
   private notificationRate = new NotificationRateLimiter();
   private readonly failureArrivals: FailureArrival[] = [];
-  private externalPending: { severity: "error" | "success" | "info"; title: string; body: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Bounded, payload-free pairing survives the short input-arbitration wait. */
+  private readonly failureCorrelation = new FailureCorrelation();
+  private externalPending: { severity: "error" | "success" | "info"; title: string; body: string; key?: string; timer: ReturnType<typeof setTimeout> } | null = null;
   private externalNotificationSequence = 0;
 
   constructor(
@@ -231,6 +234,7 @@ export class PresenceRuntime {
     // A session boundary permits a distinct Todo implementation in the new root.
     this.todo.reset();
     this.clearPendingNotifications();
+    this.failureCorrelation.clear();
     this.resetInputNotificationState();
     this.clearInputLifecycles();
     this.notificationAcceptanceTime = 0;
@@ -550,25 +554,29 @@ export class PresenceRuntime {
       this.syncCompanionBlocked();
       const inputPresent = this.inputWaiting();
       const acceptedAt = !this.activationReplay && this.consumerActive ? this.nextNotificationAcceptanceTime() : 0;
+      const failureKey = this.failureKeyForState(event, acceptedAt);
       // Retained activation replay is state reconstruction, never an alert.
       if (!this.outputReady || deferLiveNotification) {
-        if (deferLiveNotification) this.appendPendingNotification({ kind: "state", event, inputPresent, acceptedAt });
+        if (deferLiveNotification) this.appendPendingNotification({ kind: "state", event, inputPresent, acceptedAt, failureKey });
         return;
       }
-      this.render(event, acceptedAt);
+      this.render(event, acceptedAt, failureKey);
       this.syncInputNotification(isLiveInputRequest(event), inputPresent, acceptedAt);
       return;
     }
     if ("eventId" in event) {
       if (!this.recordTerminal(event, this.outputReady)) return;
+      const acceptedAt = !this.activationReplay && this.consumerActive ? this.nextNotificationAcceptanceTime() : 0;
+      const failureKey = this.failureKeyForTerminal(event, acceptedAt);
       // A terminal replay can populate the fixed token batch but never toast.
       if (!this.outputReady || deferLiveNotification) {
-        if (deferLiveNotification) this.appendPendingNotification({ kind: "terminal", event, acceptedAt: this.nextNotificationAcceptanceTime() });
+        if (deferLiveNotification) this.appendPendingNotification({ kind: "terminal", event, acceptedAt, failureKey });
         return;
       }
-      this.dispatchTerminal(event);
+      this.dispatchTerminal(event, true, failureKey);
       return;
     }
+    this.failureCorrelation.boundary(event.source, event.generation);
     this.states.delete(event.source);
     this.externalAttention.remove(event.source);
     this.syncCompanionBlocked();
@@ -668,26 +676,20 @@ export class PresenceRuntime {
     const overflow = this.pendingNotificationsOverflow;
     this.clearPendingNotifications();
     if (overflow || !this.canOutput()) return;
-    // Startup edges can wait on socket work longer than the pairing window. Pair
-    // only their original acceptance times, never a delayed drain timestamp.
-    const paired = new Set<PendingNotificationCandidate>();
+    // Pairing keys were assigned when these live edges were accepted, before
+    // startup socket work delayed this drain. Only input arbitration remains a
+    // short wait; an unadmitted input never consumes the failure key.
     const deferredFailures = new Map<PendingNotificationCandidate, Extract<PendingNotificationCandidate, { kind: "state" }>[] >();
     const deferredFailureCandidates = new Set<PendingNotificationCandidate>();
     const isInput = (candidate: PendingNotificationCandidate) => candidate.kind === "input" || (candidate.kind === "state" && isLiveInputRequest(candidate.event));
     for (let index = 0; index < pending.length; index += 1) {
       const state = pending[index]!;
       if (state.kind !== "state" || state.event.attention?.reason !== "failure") continue;
-      const terminal = pending.find(candidate => candidate.kind === "terminal"
-        && !paired.has(candidate)
-        && candidate.event.outcome === "failed"
-        && candidate.event.source === state.event.source
-        && candidate.event.generation === state.event.generation
-        && Math.abs(candidate.acceptedAt - state.acceptedAt) <= FAILURE_PAIR_WINDOW_MS);
-      if (terminal) { paired.add(state); paired.add(terminal); continue; }
       // A failure before an input waits only until that exact input candidate is
       // attempted. A rejected candidate falls back to the normal failure alert.
       const input = pending.slice(index + 1).find(candidate => isInput(candidate)
-        && Math.abs(candidate.acceptedAt - state.acceptedAt) <= FAILURE_PAIR_WINDOW_MS);
+        && candidate.acceptedAt >= state.acceptedAt
+        && candidate.acceptedAt - state.acceptedAt <= INPUT_FAILURE_WINDOW_MS);
       if (input) {
         deferredFailureCandidates.add(state);
         deferredFailures.set(input, [...(deferredFailures.get(input) ?? []), state]);
@@ -712,20 +714,20 @@ export class PresenceRuntime {
         // only after this exact bounded input attempt has an admission receipt.
         for (const failure of deferredFailures.get(candidate) ?? []) {
           const lifecycleId = lifecycleForInput.get(candidate);
-          this.dispatchStateAttention(failure.event, false, true, failure.acceptedAt, lifecycleId);
+          this.dispatchStateAttention(failure.event, false, true, failure.acceptedAt, lifecycleId, failure.failureKey);
         }
         continue;
       }
-      if (candidate.kind === "terminal") this.dispatchTerminal(candidate.event, false);
+      if (candidate.kind === "terminal") this.dispatchTerminal(candidate.event, false, candidate.failureKey);
       else if (candidate.kind === "state") {
-        if (!paired.has(candidate) && !deferredFailureCandidates.has(candidate)) {
+        if (!deferredFailureCandidates.has(candidate)) {
           // An input may already have ended in this startup sequence. Resolve
           // the failure against that most-recent receipt exactly as the live
           // pairing timer does, so an older admitted lifecycle cannot mask a
           // newer rejected one.
           const inputLifecycleId = this.associatedInputLifecycle(candidate.acceptedAt)
             ?? this.recentInputLifecycleForFailure(candidate.acceptedAt);
-          this.dispatchStateAttention(candidate.event, false, true, candidate.acceptedAt, inputLifecycleId);
+          this.dispatchStateAttention(candidate.event, false, true, candidate.acceptedAt, inputLifecycleId, candidate.failureKey);
         }
         if (!candidate.inputPresent) {
           startupInputLifecycleActive = false;
@@ -754,6 +756,21 @@ export class PresenceRuntime {
     const now = this.notificationClock();
     if (Number.isSafeInteger(now) && now >= 0) this.notificationAcceptanceTime = Math.max(this.notificationAcceptanceTime, now);
     return this.notificationAcceptanceTime;
+  }
+
+  /** Notification identity is fixed at live acceptance, before any deferred route. */
+  private failureKeyForState(event: PresenceStateV2, acceptedAt: number): string | undefined {
+    if (!this.activationReplay && event.attention?.reason === "failure" && event.attention.occurrence === "new")
+      return this.failureCorrelation.accept({ source: event.source, generation: event.generation, sequence: event.sequence, kind: "state", acceptedAt });
+    this.failureCorrelation.boundary(event.source, event.generation);
+    return undefined;
+  }
+
+  private failureKeyForTerminal(event: PresenceTerminalV2, acceptedAt: number): string | undefined {
+    if (!this.activationReplay && event.outcome === "failed")
+      return this.failureCorrelation.accept({ source: event.source, generation: event.generation, sequence: event.sequence, kind: "terminal", acceptedAt, eventId: event.eventId });
+    this.failureCorrelation.boundary(event.source, event.generation);
+    return undefined;
   }
 
   private clearPendingNotifications() {
@@ -1100,7 +1117,7 @@ export class PresenceRuntime {
     // A failure that arrived just before this aggregate lifecycle belongs here,
     // rather than to an older lifecycle that happened to end nearby.
     for (const arrival of this.failureArrivals) {
-      if (arrival.kind === "state" && arrival.inputLifecycleId === undefined && acceptedAt >= arrival.acceptedAt && acceptedAt - arrival.acceptedAt <= FAILURE_PAIR_WINDOW_MS)
+      if (arrival.inputLifecycleId === undefined && acceptedAt >= arrival.acceptedAt && acceptedAt - arrival.acceptedAt <= INPUT_FAILURE_WINDOW_MS)
         arrival.inputLifecycleId = lifecycle.id;
     }
     this.purgeInputLifecycles();
@@ -1111,8 +1128,8 @@ export class PresenceRuntime {
     const current = this.inputLifecycle(this.currentInputLifecycleId);
     if (current && current.endedAt === undefined) {
       current.endedAt = endedAt;
-      current.expiresAt = Date.now() + FAILURE_PAIR_WINDOW_MS;
-      current.purgeTimer = setTimeout(() => this.purgeInputLifecycles(), FAILURE_PAIR_WINDOW_MS);
+      current.expiresAt = Date.now() + INPUT_FAILURE_WINDOW_MS;
+      current.purgeTimer = setTimeout(() => this.purgeInputLifecycles(), INPUT_FAILURE_WINDOW_MS);
       current.purgeTimer.unref?.();
     }
     this.currentInputLifecycleId = null;
@@ -1139,7 +1156,7 @@ export class PresenceRuntime {
   private recentInputLifecycleForFailure(acceptedAt: number): number | undefined {
     for (let index = this.inputLifecycles.length - 1; index >= 0; index -= 1) {
       const lifecycle = this.inputLifecycles[index]!;
-      if (lifecycle.endedAt !== undefined && acceptedAt >= lifecycle.endedAt && acceptedAt - lifecycle.endedAt <= FAILURE_PAIR_WINDOW_MS)
+      if (lifecycle.endedAt !== undefined && acceptedAt >= lifecycle.endedAt && acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS)
         return lifecycle.id;
     }
     return undefined;
@@ -1154,7 +1171,7 @@ export class PresenceRuntime {
     for (let index = this.inputLifecycles.length - 1; index >= 0; index -= 1) {
       const lifecycle = this.inputLifecycles[index]!;
       const referenced = this.failureArrivals.some((arrival) => arrival.inputLifecycleId === lifecycle.id || (
-        arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= FAILURE_PAIR_WINDOW_MS
+        arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS
       ));
       if (lifecycle.id !== this.currentInputLifecycleId && lifecycle.expiresAt !== undefined && lifecycle.expiresAt <= now && !referenced) {
         if (lifecycle.purgeTimer) clearTimeout(lifecycle.purgeTimer);
@@ -1165,7 +1182,7 @@ export class PresenceRuntime {
     // bounded failure arrival. Never evict a receipt still referenced by one.
     while (this.inputLifecycles.length > MAX_FAILURE_PAIRS + 1) {
       const removable = this.inputLifecycles.findIndex((lifecycle) => lifecycle.id !== this.currentInputLifecycleId && !this.failureArrivals.some((arrival) => arrival.inputLifecycleId === lifecycle.id || (
-        arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= FAILURE_PAIR_WINDOW_MS
+        arrival.inputLifecycleId === undefined && lifecycle.endedAt !== undefined && arrival.acceptedAt >= lifecycle.endedAt && arrival.acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS
       )));
       if (removable < 0) break;
       const [lifecycle] = this.inputLifecycles.splice(removable, 1);
@@ -1202,7 +1219,7 @@ export class PresenceRuntime {
     await client.metadata(presentation(), tokens, deadlineAt);
   }
 
-  private render(attention?: PresenceStateV2, acceptedAt?: number) {
+  private render(attention?: PresenceStateV2, acceptedAt?: number, failureKey?: string) {
     const ref = this.sessionRef;
     const client = this.client;
     if (!this.canOutput() || !ref || !client) return;
@@ -1212,7 +1229,7 @@ export class PresenceRuntime {
     if (this.mode === "standalone") void client.report(state, ref, safeMessage(state, this.config.maxLabelChars, events, this.active, nativePromptWaiting));
     this.renderMetadata(events, client, state);
 
-    this.dispatchStateAttention(attention, true, false, acceptedAt);
+    this.dispatchStateAttention(attention, true, false, acceptedAt, undefined, failureKey);
   }
 
   /** Metadata-only refreshes must not repeat an unchanged pane agent report. */
@@ -1224,7 +1241,7 @@ export class PresenceRuntime {
   }
 
   /** Applies one already-accepted live state edge without re-rendering startup state. */
-  private dispatchStateAttention(attention?: PresenceStateV2, deferFailure = true, immediateExternal = false, acceptedAt = this.nextNotificationAcceptanceTime(), inputLifecycleId = this.associatedInputLifecycle(acceptedAt)) {
+  private dispatchStateAttention(attention?: PresenceStateV2, deferFailure = true, immediateExternal = false, acceptedAt = this.nextNotificationAcceptanceTime(), inputLifecycleId = this.associatedInputLifecycle(acceptedAt), failureKey?: string) {
     const text = attention && attentionText(attention, this.config.maxLabelChars);
     const reason = attention?.attention?.reason;
     if (!attention || !text || text.inputNeeded || !reason) return;
@@ -1236,7 +1253,7 @@ export class PresenceRuntime {
         // Let a same-turn terminal claim the alert, while state-only failures retain
         // their normal policy, coalescing, and rate-limit behavior.
         this.queueStateFailure(attention.source, attention.generation, acceptedAt, inputLifecycleId, () => {
-          this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin);
+          this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin, false, failureKey);
         });
         return;
       }
@@ -1245,12 +1262,12 @@ export class PresenceRuntime {
       if (this.failureSuppressedByLifecycle(inputLifecycleId)) return;
       if (origin === "external") {
         if (this.externalAttention.accept(attention.source, attention.generation, attentionKind)) {
-          this.notify(severity, `${attention.source}:${attention.generation}:${attention.sequence}:${this.turn}:${reason}`, text.title, text.body, origin);
+          this.notify(severity, failureKey ?? `${attention.source}:${attention.generation}:${attention.sequence}:${this.turn}:${reason}`, text.title, text.body, origin);
         }
         return;
       }
     }
-    this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin, immediateExternal);
+    this.dispatchAttention(attention, attentionKind, severity, text.title, text.body, origin, immediateExternal, failureKey);
   }
 
   /** Records each exact terminal identity once, including across reset producer fences. */
@@ -1294,7 +1311,7 @@ export class PresenceRuntime {
   }
 
   /** Terminal alert policy runs after recording so metadata always includes its batch. */
-  private dispatchTerminal(event: PresenceTerminalV2, emitMetadata = true) {
+  private dispatchTerminal(event: PresenceTerminalV2, emitMetadata = true, failureKey?: string) {
     const events = [...this.states.values()];
     const client = this.client;
     // Route terminal metadata through the shared projection so its summary is
@@ -1305,9 +1322,8 @@ export class PresenceRuntime {
     if (event.outcome === "cancelled") return;
     const severity = event.outcome === "failed" ? "error" : "success";
     const origin = event.source === "pi" ? "local" : "external";
-    const key = `terminal:${event.source}:${event.generation}:${event.eventId}`;
+    const key = failureKey ?? `terminal:${event.source}:${event.generation}:${event.eventId}`;
     if (severity === "error") {
-      this.suppressPairedStateFailure(event.source, event.generation);
       this.discardExternalProgress();
       this.notifyTerminalFailure(key, origin);
       return;
@@ -1323,24 +1339,11 @@ export class PresenceRuntime {
     return this.terminalRecords.length > 0 ? encodeTerminalBatch(this.terminalRecords, this.terminalOverflow) : undefined;
   }
 
-  /** State failures wait only for a synchronous same-generation terminal. */
+  /** State failures wait only for the existing synchronous input arbitration. */
   private queueStateFailure(source: string, generation: number, acceptedAt: number, inputLifecycleId: number | undefined, notify: () => void) {
     this.purgeFailureArrivals();
-    const terminalIndex = this.failureArrivals.findIndex(entry => entry.source === source && entry.generation === generation && entry.kind === "terminal");
-    if (terminalIndex >= 0) { this.removeFailureArrival(this.failureArrivals[terminalIndex]!); this.purgeInputLifecycles(); return; }
-    const entry: FailureArrival = { source, generation, kind: "state", acceptedAt, expiresAt: Date.now() + FAILURE_PAIR_WINDOW_MS, inputLifecycleId, notify };
-    entry.timer = setTimeout(() => this.expireFailureArrival(entry), FAILURE_PAIR_WINDOW_MS);
-    entry.timer.unref?.();
-    this.rememberFailure(entry);
-  }
-
-  /** A terminal never loses its own alert; it only cancels one paired state alert. */
-  private suppressPairedStateFailure(source: string, generation: number) {
-    this.purgeFailureArrivals();
-    const stateIndex = this.failureArrivals.findIndex(entry => entry.source === source && entry.generation === generation && entry.kind === "state");
-    if (stateIndex >= 0) { this.removeFailureArrival(this.failureArrivals[stateIndex]!); this.purgeInputLifecycles(); return; }
-    const entry: FailureArrival = { source, generation, kind: "terminal", acceptedAt: this.nextNotificationAcceptanceTime(), expiresAt: Date.now() + FAILURE_PAIR_WINDOW_MS };
-    entry.timer = setTimeout(() => this.expireFailureArrival(entry), FAILURE_PAIR_WINDOW_MS);
+    const entry: FailureArrival = { source, generation, acceptedAt, expiresAt: Date.now() + INPUT_FAILURE_WINDOW_MS, inputLifecycleId, notify };
+    entry.timer = setTimeout(() => this.expireFailureArrival(entry), INPUT_FAILURE_WINDOW_MS);
     entry.timer.unref?.();
     this.rememberFailure(entry);
   }
@@ -1380,19 +1383,19 @@ export class PresenceRuntime {
     this.purgeInputLifecycles();
   }
 
-  private dispatchAttention(attention: PresenceStateV2, attentionKind: "error" | "success", severity: "error" | "success", title: string, body: string, origin: "local" | "external", immediateExternal = false) {
+  private dispatchAttention(attention: PresenceStateV2, attentionKind: "error" | "success", severity: "error" | "success", title: string, body: string, origin: "local" | "external", immediateExternal = false, notificationKey?: string) {
     const externalTransition = origin === "external" && this.externalAttention.accept(attention.source, attention.generation, attentionKind);
     if (origin === "external") {
       if (externalTransition) {
         // Deferred startup candidates are already bounded and ordered. Preserve
         // that order while retaining normal semantic dedupe, policy, and rate fences.
-        if (immediateExternal) this.notify(severity, `external:${++this.externalNotificationSequence}:${severity}`, title, body, "external");
-        else this.queueExternalAttention(severity, title, body);
+        if (immediateExternal) this.notify(severity, notificationKey ?? `external:${++this.externalNotificationSequence}:${severity}`, title, body, "external");
+        else this.queueExternalAttention(severity, title, body, notificationKey);
       }
       return;
     }
     if (severity === "error") this.discardExternalProgress();
-    this.notify(severity, `${attention.source}:${attention.generation}:${attention.sequence}:${this.turn}:${attention.attention?.reason}`, title, body, "local");
+    this.notify(severity, notificationKey ?? `${attention.source}:${attention.generation}:${attention.sequence}:${this.turn}:${attention.attention?.reason}`, title, body, "local");
   }
 
   /** A terminal-only failure cannot be derived by unmodified Herdr from the V2 token map. */
@@ -1417,18 +1420,18 @@ export class PresenceRuntime {
   }
 
   /** Event-bus bursts get one static alert; error replaces pending progress without delaying the first timer. */
-  private queueExternalAttention(severity: "error" | "success" | "info", title: string, body: string) {
+  private queueExternalAttention(severity: "error" | "success" | "info", title: string, body: string, key?: string) {
     const pending = this.externalPending;
     if (pending) {
       const priority = { info: 0, success: 1, error: 2 };
-      if (priority[severity] > priority[pending.severity]) { pending.severity = severity; pending.title = title; pending.body = body; }
+      if (priority[severity] > priority[pending.severity]) { pending.severity = severity; pending.title = title; pending.body = body; pending.key = key; }
       return;
     }
-    const next = { severity, title, body, timer: undefined as unknown as ReturnType<typeof setTimeout> };
+    const next = { severity, title, body, key, timer: undefined as unknown as ReturnType<typeof setTimeout> };
     next.timer = setTimeout(() => {
       if (this.externalPending !== next) return;
       this.externalPending = null;
-      this.notify(next.severity, `external:${++this.externalNotificationSequence}:${next.severity}`, next.title, next.body, "external");
+      this.notify(next.severity, next.key ?? `external:${++this.externalNotificationSequence}:${next.severity}`, next.title, next.body, "external");
     }, EXTERNAL_NOTIFICATION_COALESCE_MS);
     next.timer.unref?.();
     this.externalPending = next;
@@ -1548,6 +1551,7 @@ export class PresenceRuntime {
     this.notificationRate.clear();
     this.inputNotificationTransitions = 0;
     this.clearFailureArrivals();
+    this.failureCorrelation.clear();
   }
 
   private async teardown(deadlineAt?: number) {

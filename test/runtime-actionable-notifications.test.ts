@@ -377,7 +377,7 @@ serial(
 		}),
 );
 serial(
-	"a delayed same-generation failure state retains typed attention after the pairing window",
+	"a terminal then state failure delayed beyond input arbitration shares one notification key",
 	async () => withRuntime({}, async ({ producer, requests }) => {
 		const subagent = producer("subagent");
 		subagent.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" });
@@ -385,7 +385,64 @@ serial(
 		await sleep(20);
 		subagent.publishState(error(2));
 		await eventually(() => expect(attention(requests, "failure:new")).toBe(true));
+		await sleep(100);
 		expect(notices(requests)).toHaveLength(1);
+	}),
+);
+serial(
+	"a state then terminal failure delayed beyond input arbitration shares one notification key",
+	async () => withRuntime({}, async ({ producer, requests }) => {
+		const subagent = producer("subagent");
+		subagent.publishState(error(1));
+		await sleep(20);
+		subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
+		await eventually(() => expect(metas(requests).some((request) => tokens(request).v2_terminals === "subagent:1:1:failed")).toBe(true));
+		await sleep(100);
+		expect(notices(requests)).toHaveLength(1);
+	}),
+);
+serial(
+	"failure representations beyond 100ms retain independent alerts",
+	async () => withRuntime({}, async ({ producer, requests }) => {
+		const subagent = producer("subagent");
+		subagent.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" });
+		await eventually(() => expect(notices(requests)).toHaveLength(1));
+		await sleep(110);
+		subagent.publishState(error(2));
+		await eventually(() => expect(notices(requests)).toHaveLength(2));
+	}),
+);
+serial(
+	"non-adjacent failure sequences retain independent alerts",
+	async () => withRuntime({}, async ({ producer, requests }) => {
+		const subagent = producer("subagent");
+		subagent.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" });
+		await eventually(() => expect(notices(requests)).toHaveLength(1));
+		subagent.publishState(error(3));
+		await eventually(() => expect(notices(requests)).toHaveLength(2));
+	}),
+);
+serial(
+	"an intervening same-source event prevents failure pairing",
+	async () => withRuntime({}, async ({ producer, requests }) => {
+		const subagent = producer("subagent");
+		subagent.publishState(error(1));
+		await eventually(() => expect(notices(requests)).toHaveLength(1));
+		subagent.publishState({ version: 2, generation: 1, sequence: 2, source: "subagent", state: "running" });
+		subagent.publishTerminal({ version: 2, generation: 1, sequence: 3, source: "subagent", eventId: 1, outcome: "failed" });
+		await eventually(() => expect(notices(requests)).toHaveLength(2));
+	}),
+);
+serial(
+	"a terminal burst gives the following state the newest terminal key",
+	async () => withRuntime({}, async ({ producer, requests }) => {
+		const subagent = producer("subagent");
+		subagent.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "failed" });
+		subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 2, outcome: "failed" });
+		await eventually(() => expect(notices(requests)).toHaveLength(2));
+		subagent.publishState(error(3));
+		await sleep(100);
+		expect(notices(requests)).toHaveLength(2);
 	}),
 );
 serial(
