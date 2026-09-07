@@ -7,9 +7,10 @@ export function shouldNotify(policy: NotificationPolicy, enabled: boolean, sever
   if (!enabled || policy === "disabled") return false;
   if (severity === "error" || severity === "attention") return true;
   if (policy === "errors") return false;
-  if (policy === "all") return true;
   if (policy === "settled") return severity === "success" && origin === "local";
-  return origin === "external" || severity === "long-running";
+  if (severity === "long-running") return origin === "local";
+  if (policy === "all") return true;
+  return origin === "external";
 }
 
 /** Fixed TTL/LRU gate: a repeated visible edge cannot grow retained state. */

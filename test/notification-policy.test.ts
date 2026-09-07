@@ -10,9 +10,9 @@ describe("notification policy module", () => {
   test("applies the complete enabled policy, origin, and severity matrix", () => {
     const matrix = [
       { policy: "errors", values: { error: [true, true], attention: [true, true], success: [false, false], info: [false, false], "long-running": [false, false] } },
-      { policy: "background", values: { error: [true, true], attention: [true, true], success: [false, true], info: [false, true], "long-running": [true, true] } },
+      { policy: "background", values: { error: [true, true], attention: [true, true], success: [false, true], info: [false, true], "long-running": [true, false] } },
       { policy: "settled", values: { error: [true, true], attention: [true, true], success: [true, false], info: [false, false], "long-running": [false, false] } },
-      { policy: "all", values: { error: [true, true], attention: [true, true], success: [true, true], info: [true, true], "long-running": [true, true] } },
+      { policy: "all", values: { error: [true, true], attention: [true, true], success: [true, true], info: [true, true], "long-running": [true, false] } },
       { policy: "disabled", values: { error: [false, false], attention: [false, false], success: [false, false], info: [false, false], "long-running": [false, false] } },
     ] as const;
     const origins = [["local", 0], ["external", 1]] as const;

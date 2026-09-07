@@ -78,9 +78,9 @@ Notifications always use fixed local text, are bounded/deduplicated, and are not
 | Policy | Additionally eligible |
 | --- | --- |
 | `errors` | Nothing: live terminal failures and new `blocked`, `input_required`, or `failure` attention only. |
-| `background` | External success/info and local or external long-running notices. |
+| `background` | External success/info and local long-running notices. |
 | `settled` | Local successful settlement only. |
-| `all` | Local and external success/info plus long-running notices. |
+| `all` | Local and external success/info plus local long-running notices. |
 | `disabled` | Nothing. |
 
 Completion and cancellation remain quiet under the default `errors` policy.
