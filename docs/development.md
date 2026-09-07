@@ -8,9 +8,9 @@ bun run ci
 bun pm pack --dry-run
 ```
 
-`@pi/presence` is pinned exactly to `github:spi-ca/pi-presence#v2-20260828-1`. Do not use a range, sibling path dependency, or the retired package name. Pi development types are pinned exactly to `@earendil-works/pi-coding-agent@0.84.4`; the non-optional peer range remains `*`. Register `ui_prompt_start` and `ui_prompt_end` directly through the Pi `0.84.4` `ExtensionAPI`; do not add event-registration fallback, unsafe casts, or runtime-version shims. Keep `agent_end` terminal derivation and `agent_settled` settlement as separate callbacks.
+`@pi/presence` is pinned exactly to `github:spi-ca/pi-presence#v2-20260828-1`. Do not use a range, sibling path dependency, or the retired package name. `test` and coverage commands use Bun's `--isolate` per-file fresh global object because the shared presence registry and process coordinator are intentionally process-global within an extension runtime; this prevents unrelated test files from inheriting their retained state. Pi development types are pinned exactly to `@earendil-works/pi-coding-agent@0.84.4`; the non-optional peer range remains `*`. Register `ui_prompt_start` and `ui_prompt_end` directly through the Pi `0.84.4` `ExtensionAPI`; do not add event-registration fallback, unsafe casts, or runtime-version shims. Keep `agent_end` terminal derivation and `agent_settled` settlement as separate callbacks.
 
-Extension scope is Herdr socket transport, managed-authority detection, lifecycle-to-pane reporting, fixed safe presentation, exact ten-token projection, aggregate native TUI prompt and accepted V2 `ask_user` waiting state, and the workspace-summary lease. Shared V2 protocol and lifecycle behavior are canonical in the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/README.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/fixtures/normative.json). Upstream Herdr and Pi core are out of scope.
+Extension scope is Herdr socket transport, managed-authority detection, lifecycle-to-pane reporting, fixed safe presentation, exact ten-token projection, aggregate native TUI prompt and accepted V2 `ask_user` waiting state, and the workspace-summary lease. Shared V2 protocol and lifecycle behavior are canonical in the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/fixtures/normative.json). Upstream Herdr and Pi core are out of scope.
 
 ## Checks and coverage
 
@@ -58,3 +58,14 @@ Keep deterministic logic in focused module tests. For timer code such as `src/wo
 Place distributable developer utilities in `scripts/` and invoke them through a named `package.json` script. Keep smoke harnesses out of `test/`: they must require an explicit destructive-safety opt-in and must not be collected by `bun test`. `scripts/check-coverage.ts` is the CI gate; preserve its explicit threshold and reporter-total validation when changing it.
 
 Same-JavaScript-realm extensions are trusted arbitrary code. The process coordinator is fail-closed defense against accidental or structural misuse, not protection from an extension deliberately controlling the shared realm.
+
+## Automatic CI compatibility matrix
+
+Push and pull-request CI runs `bun run ci`, `bun pm pack --dry-run`, and a provider-free tarball smoke. The smoke installs the tarball in an isolated temporary consumer with lifecycle scripts disabled, injects exact Pi runtime peers, imports it, and invokes only a registration stub; it removes `KIRO_API_KEY`, sets `PI_OFFLINE=1`, and never invokes the real-Herdr smoke harness. Both lanes log the selected Bun version and the path and version of `cc`.
+
+| Lane | Bun | Pi development graph | Install |
+| --- | --- | --- | --- |
+| locked baseline | 1.3.14 (`packageManager`) | `pi-coding-agent` exact 0.84.4 lockfile graph | `bun install --frozen-lockfile` |
+| current compatibility | 1.4.2 | the declared Pi devDependency selected exactly at 0.85.1 in an ephemeral graph | `bun install --no-save` |
+
+Each lane's repository-install graph verifier recursively inspects hoisted links and Bun `.bun` nested symlinks against the selected exact stack mapping: `0.84.4` for the locked baseline and `0.85.1` for compatibility. Every package in that selected mapping must be installed at its exact version. Separately, the tarball smoke deliberately injects the complete selected exact Pi graph and declared non-Pi peers into its isolated consumer as a deterministic compatibility harness against wildcard or transitive drift; it is not a minimal-peer-install proof. The compatibility lane does not allow the `*` peer range to choose a latest package: it temporarily selects every declared Pi development package at exact `0.85.1`, restores the manifest, and confirms that the lockfile is unchanged. This is the hosted-CI configuration; it is not evidence of a local reinstall or a live-Herdr/provider check.

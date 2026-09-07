@@ -10,7 +10,7 @@ function failMissingTotals(): never {
 
 async function main() {
 	const child = Bun.spawn({
-		cmd: ["bun", "test", "--coverage", "--coverage-reporter=text"],
+		cmd: ["bun", "test", "--isolate", "--coverage", "--coverage-reporter=text"],
 		stdout: "pipe",
 		stderr: "pipe",
 	});

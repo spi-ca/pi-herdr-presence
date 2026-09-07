@@ -7,7 +7,7 @@ import { resolvePresenceConfig } from "../src/config.js";
 import { PresenceRuntime } from "../src/runtime.js";
 import type { WorkspaceSummaryScheduler, WorkspaceSummaryTimer } from "../src/workspace-summary.js";
 import { paneInfo } from "./fixtures/pane-info.js";
-import { fakeSocket } from "./helpers/fake-socket.js";
+import { fakeSocket, type FakeSocketContext } from "./helpers/fake-socket.js";
 
 type Request = { id: string; method: string; params: Record<string, unknown> };
 type Scheduled = { callback: () => void; active: boolean };
@@ -49,10 +49,10 @@ async function until(condition: () => boolean) {
   }
 }
 
-async function workspaceRuntime(name: string, handler: (request: Request) => string | Promise<string>, scheduler?: WorkspaceSummaryScheduler) {
+async function workspaceRuntime(name: string, handler: (request: Request, connection: FakeSocketContext) => string | Promise<string>, scheduler?: WorkspaceSummaryScheduler) {
   const directory = await fs.mkdtemp(join(os.tmpdir(), name));
   const socket = join(directory, "socket");
-  const server = await fakeSocket(socket, async (line) => handler(JSON.parse(line) as Request));
+  const server = await fakeSocket(socket, async (line, connection) => handler(JSON.parse(line) as Request, connection));
   const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
   Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_WORKSPACE_ID: "workspace", HERDR_PANE_ID: "pane", PI_CODING_AGENT_DIR: join(directory, "absent") });
   let runtime: PresenceRuntime | undefined;
@@ -140,12 +140,12 @@ test("replacement fences a stalled workspace list before it can write", async ()
   const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
   const seenFirst = new Promise<void>(resolve => { firstSeen = resolve; });
   const seenSecond = new Promise<void>(resolve => { secondSeen = resolve; });
-  const fixture = await workspaceRuntime("herdr-workspace-replacement-fence-", async (request) => {
+  const fixture = await workspaceRuntime("herdr-workspace-replacement-fence-", async (request, connection) => {
     requests.push(request);
     if (request.method === "pane.list") {
       listCalls += 1;
-      if (listCalls === 1) { firstSeen(); await firstGate; }
-      if (listCalls === 2) { secondSeen(); await secondGate; }
+      if (listCalls === 1) { connection.expectPeerClosure(); firstSeen(); await firstGate; }
+      if (listCalls === 2) { connection.expectPeerClosure(); secondSeen(); await secondGate; }
       return JSON.stringify({ id: request.id, result: { type: "pane_list", panes: [paneInfo()] } });
     }
     return JSON.stringify({ id: request.id, result: { type: "ok" } });
@@ -182,11 +182,11 @@ test("valid shutdown fences a lease-timer workspace list before it can write", a
   let stalled!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const seenStalled = new Promise<void>(resolve => { stalled = resolve; });
-  const fixture = await workspaceRuntime("herdr-workspace-shutdown-fence-", async (request) => {
+  const fixture = await workspaceRuntime("herdr-workspace-shutdown-fence-", async (request, connection) => {
     requests.push(request);
     if (request.method === "pane.list") {
       listCalls += 1;
-      if (listCalls === 2) { stalled(); await gate; }
+      if (listCalls === 2) { connection.expectPeerClosure(); stalled(); await gate; }
       return JSON.stringify({ id: request.id, result: { type: "pane_list", panes: [paneInfo()] } });
     }
     return JSON.stringify({ id: request.id, result: { type: "ok" } });

@@ -241,6 +241,39 @@ test("companion balances native prompt leases across replacement and shutdown", 
   });
 });
 
+test("canonical pending-zero interaction keeps the companion lease balanced through withdrawal", async () => {
+  const bus = makeBus();
+  const blocked: Array<{ active: boolean; label?: string }> = [];
+  bus.events.on("herdr:blocked", payload => blocked.push(payload as { active: boolean; label?: string }));
+  await withRuntime(async (_runtime, activeBus, requests) => {
+    const interaction = createPresenceProducer({ source: "interaction", emit: activeBus.events.emit })!;
+    expect(interaction.activate()).toBe(true);
+    try {
+      // The producer and active consumer use the canonical shared registry path;
+      // no DTO is injected directly into the runtime.
+      expect(interaction.publishState({ version: 2, generation: 1, sequence: 1, source: "interaction", state: "waiting", interaction: { kind: "ask_user", pending: 0 }, attention: { reason: "input_required", occurrence: "new" } })).toBe(true);
+      await pause();
+      const ingress = requests.filter(request => request.method === "pane.report_metadata" && "title" in request.params).at(-1);
+      expect(ingress).toBeDefined();
+      expectExactCompanionMetadataIngress(ingress!.params);
+      expect((ingress!.params.tokens as Record<string, unknown>)).toMatchObject({ summary: "input · input 0", v2_interaction: "ask_user:0" });
+      expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }]);
+      expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
+
+      expect(interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" })).toBe(true);
+      await pause();
+      expect(blocked).toEqual([{ active: true, label: "Pi needs your input" }, { active: false }]);
+      expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
+    } finally {
+      interaction.deactivate();
+    }
+  }, { ...resolvePresenceConfig(), soleReporter: true, mode: "companion", notificationPolicy: "all" }, bus, async (directory) => {
+    const agentDirectory = join(directory, "missing-agent-dir", "extensions");
+    await fs.mkdir(agentDirectory, { recursive: true });
+    await fs.writeFile(join(agentDirectory, "herdr-agent-state.ts"), "HERDR_INTEGRATION_ID=pi");
+  });
+});
+
 test("a managed official integration selects companion presentation mode", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-managed-v2-"));
   const saved = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));

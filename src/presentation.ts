@@ -19,7 +19,9 @@ function decimal(value: unknown): string | null {
 }
 
 export function isInteractionWaiting(event: PresenceStateV2): boolean {
-  return event.source === "interaction" && event.state === "waiting" && event.interaction?.kind === "ask_user" && event.interaction.pending > 0;
+  // The pinned shared DTO permits the inclusive zero boundary. Presence is
+  // determined by its accepted interaction/waiting shape, not its count.
+  return event.source === "interaction" && event.state === "waiting" && event.interaction?.kind === "ask_user";
 }
 export function isLiveInputRequest(event: PresenceStateV2): boolean {
   return isInteractionWaiting(event) && event.attention?.reason === "input_required" && event.attention.occurrence === "new";

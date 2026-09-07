@@ -22,8 +22,8 @@
   },
   "private": true,
   "scripts": {
-    "test": "bun test",
-    "coverage": "bun test --coverage --coverage-reporter=text",
+    "test": "bun test --isolate",
+    "coverage": "bun test --isolate --coverage --coverage-reporter=text",
     "coverage:check": "bun scripts/check-coverage.ts",
     "check": "bunx tsc --noEmit",
     "lint": "biome lint --error-on-warnings .",

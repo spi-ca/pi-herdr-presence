@@ -42,6 +42,11 @@ const safeText = (v: unknown, max = 512): v is string => typeof v === "string" &
 /** IDs are opaque protocol capabilities and must not be whitespace-normalized. */
 const safeOpaqueId = (v: unknown, max = 256): v is string => safeText(v, max) && v === v.trim();
 const own = (v: Record<string, unknown>, allowed: readonly string[], required: readonly string[]) => Reflect.ownKeys(v).every((k) => typeof k === "string" && allowed.includes(k)) && required.every((k) => Object.hasOwn(v, k));
+/** Response rows are untrusted: accept only own data fields from the explicit schema. */
+const ownData = (v: Record<string, unknown>, allowed: readonly string[], required: readonly string[]) => own(v, allowed, required) && Reflect.ownKeys(v).every((key) => {
+ const descriptor = Object.getOwnPropertyDescriptor(v, key);
+ return descriptor !== undefined && "value" in descriptor;
+});
 /** Parses only the compact values introduced by this fixed Herdr projection. */
 const canonicalInteger = (value: unknown, minimum = 0): value is string => {
  if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,6})$/.test(value)) return false;
@@ -137,10 +142,11 @@ type WorkspacePaneInfo = {
 };
 /** A scoped read is usable only when every bounded, schema-faithful PaneInfo names that workspace and a unique pane. */
 export function isExactWorkspacePaneListResult(value: unknown, workspaceId: string): value is { type: "pane_list"; panes: WorkspacePaneInfo[] } {
- if (!safeOpaqueId(workspaceId) || !isPlainObject(value) || !own(value, ["type", "panes"], ["type", "panes"]) || value.type !== "pane_list" || !Array.isArray(value.panes) || value.panes.length > 128) return false;
+ if (!safeOpaqueId(workspaceId) || !isPlainObject(value) || !ownData(value, ["type", "panes"], ["type", "panes"]) || value.type !== "pane_list" || !Array.isArray(value.panes) || value.panes.length > 128) return false;
  const paneIds = new Set<string>();
  for (const pane of value.panes) {
   if (!isPlainObject(pane)
+   || !ownData(pane, ["pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision", "agent"], ["pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision"])
    || !safeOpaqueId(pane.workspace_id) || pane.workspace_id !== workspaceId
    || !safeOpaqueId(pane.pane_id) || !safeOpaqueId(pane.terminal_id) || !safeOpaqueId(pane.tab_id)
    || typeof pane.focused !== "boolean" || !PANE_AGENT_STATUSES.has(pane.agent_status as string)
