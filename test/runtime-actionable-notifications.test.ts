@@ -317,7 +317,7 @@ serial(
 		}),
 );
 serial(
-	"input_required churn is rate-bounded and withdraws the final typed lifecycle",
+	"short input_required churn cancels every pre-dispatch toast and withdraws the final typed lifecycle",
 	async () =>
 		withRuntime({}, async ({ producer, requests }) => {
 			const interaction = producer("interaction");
@@ -336,8 +336,7 @@ serial(
 			}
 			await sleep(120);
 			expect(metas(requests).some((request) => tokens(request).v2_interaction === null && tokens(request).v2_attention === null)).toBe(true);
-			expect(notices(requests).length).toBeGreaterThan(0);
-			expect(notices(requests).length).toBeLessThanOrEqual(9);
+			expect(notices(requests)).toEqual([]);
 		}),
 );
 serial(

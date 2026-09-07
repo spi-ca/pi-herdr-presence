@@ -11,6 +11,7 @@ import {
 } from "@pi/presence";
 import { resolvePresenceConfig } from "../src/config.js";
 import { PresenceRuntime } from "../src/runtime.js";
+import type { SocketFingerprint } from "../src/identity.js";
 import { fakeSocket } from "./helpers/fake-socket.js";
 
 type Request = {
@@ -337,29 +338,29 @@ serial(
 		}),
 );
 serial(
-	"native failure then input then end retains the admitted input arbitration",
+	"native short prompt cancels its pre-dispatch input and releases nearby failure",
 	async () =>
 		withRuntime({}, async ({ runtime, producer, requests }) => {
 			const context = (runtime as unknown as { context: object }).context;
 			producer("subagent").publishState(failure(1));
 			runtime.handleUiPromptStart(context);
 			runtime.handleUiPromptEnd(context);
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]);
 			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
 			expect("inputNotificationTimer" in (runtime as object)).toBe(false);
 		}),
 );
 serial(
-	"native input then failure then end retains the admitted input arbitration",
+	"native short prompt releases a following nearby failure before physical input dispatch",
 	async () =>
 		withRuntime({}, async ({ runtime, producer, requests }) => {
 			const context = (runtime as unknown as { context: object }).context;
 			runtime.handleUiPromptStart(context);
 			producer("subagent").publishState(failure(1));
 			runtime.handleUiPromptEnd(context);
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
 		}),
 );
 serial(
@@ -378,29 +379,29 @@ serial(
 		}),
 );
 serial(
-	"V2 failure then input then withdrawal retains the admitted input arbitration",
+	"V2 short prompt cancels pre-dispatch input and releases earlier nearby failure",
 	async () =>
 		withRuntime({}, async ({ producer, requests }) => {
 			const interaction = producer("interaction");
 			producer("subagent").publishState(failure(1));
 			interaction.publishState(input(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]);
 		}),
 );
 serial(
-	"V2 input then failure then withdrawal retains the admitted input arbitration",
+	"V2 short prompt cancels pre-dispatch input and releases following nearby failure",
 	async () =>
 		withRuntime({}, async ({ producer, requests }) => {
 			const interaction = producer("interaction");
 			interaction.publishState(input(1));
 			producer("subagent").publishState(failure(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]);
 		}),
 );
 serial(
@@ -494,7 +495,7 @@ serial(
 		}),
 );
 serial(
-	"a queued failure remains bound to admitted A while rejected B owns its own failure",
+	"a pre-dispatch A rollback does not lend its input reservation to rate-rejected B",
 	async () =>
 		withRuntime({}, async ({ runtime, producer, requests }) => {
 			const interaction = producer("interaction");
@@ -509,9 +510,10 @@ serial(
 			interaction.publishState(input(1, 2));
 			subagent.publishState(failure(1, 2));
 			interaction.withdraw({ version: 2, generation: 2, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+			// A no-longer-committed input reservation cannot suppress either
+			// failure, and the deliberately full rate window blocks both alerts.
+			expect(notices(requests)).toEqual([]);
 			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
 		}),
 );
@@ -529,6 +531,149 @@ serial(
 			producer("subagent").publishState(failure(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
 			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+		}),
+);
+serial(
+	"a delayed pre-write input releases its attached fallback before a maxQueue=1 prompt-end projection",
+	async () =>
+		withRuntime({ maxQueue: 1 }, async ({ runtime, producer, requests }) => {
+			let releaseFingerprint!: () => void;
+			let fingerprintStarted!: () => void;
+			const fingerprintGate = new Promise<void>((resolve) => { releaseFingerprint = resolve; });
+			const fingerprintSeen = new Promise<void>((resolve) => { fingerprintStarted = resolve; });
+			const client = runtime as unknown as {
+				client: { transport: {
+					fingerprint: (candidate: string) => Promise<SocketFingerprint>;
+					queue: { active: { item: { key?: string } } | null };
+				} };
+				context: object;
+				render(...args: [unknown?, number?, string?]): void;
+				dispatchStateAttention(attention?: unknown, deferFailure?: boolean, immediateExternal?: boolean, acceptedAt?: number, inputLifecycleId?: number, failureKey?: string): void;
+			};
+			let fingerprintHeld = false;
+			client.client.transport.fingerprint = async () => {
+				// Hold exactly the input request at its pre-connect fingerprint;
+				// prior prompt projections remain real transport traffic.
+				if (!fingerprintHeld && client.client.transport.queue.active?.item.key?.startsWith("notification:input:")) {
+					fingerprintHeld = true;
+					fingerprintStarted();
+					await fingerprintGate;
+				}
+				return { dev: 1, ino: 1, uid: 1 };
+			};
+			// Hold the input itself, not an unrelated projection. The real
+			// prompt-end render is restored before withdrawal.
+			const render = client.render;
+			client.render = (attention, acceptedAt, failureKey) => {
+				if (attention) client.dispatchStateAttention(attention, true, false, acceptedAt, undefined, failureKey);
+			};
+			runtime.handleUiPromptStart(client.context);
+			await fingerprintSeen;
+			producer("subagent").publishState(failure(1));
+			await sleep(20);
+			client.render = render;
+			runtime.handleUiPromptEnd(client.context);
+			await Promise.resolve();
+			releaseFingerprint();
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			expect(notices(requests).some((request) => request.params?.title === "Pi needs your input")).toBe(false);
+			const beforeRecovery = requests.filter((request) => request.method === "pane.report_agent").length;
+			runtime.handleAgentStart(client.context);
+			await eventually(() => expect(requests.filter((request) => request.method === "pane.report_agent").length).toBeGreaterThan(beforeRecovery));
+		}),
+);
+serial(
+	"releases an over-64 attached fallback overflow through the real socket queue",
+	async () =>
+		withRuntime({ maxQueue: 1 }, async ({ runtime, requests }) => {
+			let releaseFingerprint!: () => void;
+			let fingerprintStarted!: () => void;
+			const fingerprintGate = new Promise<void>((resolve) => { releaseFingerprint = resolve; });
+			const fingerprintSeen = new Promise<void>((resolve) => { fingerprintStarted = resolve; });
+			const internal = runtime as unknown as {
+				client: { transport: {
+					fingerprint: (candidate: string) => Promise<SocketFingerprint>;
+					queue: { active: { item: { key?: string } } | null };
+				} };
+				context: object;
+				render(...args: [unknown?, number?, string?]): void;
+				currentInputLifecycleId: number;
+				deferFailureUntilInputDisposition(id: number, notify: () => void): boolean;
+			};
+			let held = false;
+			internal.client.transport.fingerprint = async () => {
+				if (!held && internal.client.transport.queue.active?.item.key?.startsWith("notification:input:")) {
+					held = true;
+					fingerprintStarted();
+					await fingerprintGate;
+				}
+				return { dev: 1, ino: 1, uid: 1 };
+			};
+			const render = internal.render;
+			internal.render = () => {};
+			runtime.handleUiPromptStart(internal.context);
+			await fingerprintSeen;
+			for (let index = 0; index <= 64; index += 1)
+				expect(internal.deferFailureUntilInputDisposition(internal.currentInputLifecycleId, () => {})).toBe(true);
+			internal.render = render;
+			runtime.handleUiPromptEnd(internal.context);
+			releaseFingerprint();
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			expect(notices(requests).some((request) => request.params?.title === "Pi needs your input")).toBe(false);
+		}),
+);
+serial(
+	"a delayed old notification disposition cannot poison a replacement session", async () =>
+		withRuntime({}, async ({ runtime, requests }) => {
+			let releaseFingerprint!: () => void;
+			let fingerprintStarted!: () => void;
+			const fingerprintGate = new Promise<void>((resolve) => { releaseFingerprint = resolve; });
+			const fingerprintSeen = new Promise<void>((resolve) => { fingerprintStarted = resolve; });
+			const internal = runtime as unknown as {
+				client: { transport: {
+					fingerprint: (candidate: string) => Promise<SocketFingerprint>;
+					queue: { active: { item: { key?: string } } | null };
+				} };
+				notify(severity: string, key: string, title: string, body: string, origin: "local" | "external"): boolean;
+			};
+			internal.client.transport.fingerprint = async () => {
+				if (internal.client.transport.queue.active?.item.key === "notification:replacement-key") {
+					fingerprintStarted();
+					await fingerprintGate;
+				}
+				return { dev: 1, ino: 1, uid: 1 };
+			};
+			expect(internal.notify("error", "replacement-key", "Pi needs attention", "old", "local")).toBe(true);
+			await fingerprintSeen;
+			const replacementContext = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
+			const replacing = runtime.startSession(replacementContext);
+			releaseFingerprint();
+			await replacing;
+			// The released old reservation is stale. A same-key notification in the
+			// replacement must have a fresh policy reservation and reach the socket.
+			expect(internal.notify("error", "replacement-key", "Pi needs attention", "new", "local")).toBe(true);
+			await eventually(() => expect(notices(requests)).toHaveLength(1));
+		}),
+);
+serial(
+	"input fallback overflow retains callbacks until pre-dispatch release", async () =>
+		withRuntime({}, async ({ runtime }) => {
+			const internal = runtime as unknown as {
+				beginInputLifecycle(acceptedAt: number): { id: number; fallbacks: Array<() => void>; fallbackOverflow: boolean };
+				setInputNotificationStatus(id: number, status: "pending" | "released"): void;
+				deferFailureUntilInputDisposition(id: number, notify: () => void): boolean;
+			};
+			const lifecycle = internal.beginInputLifecycle(0);
+			internal.setInputNotificationStatus(lifecycle.id, "pending");
+			let callbacks = 0;
+			for (let index = 0; index <= 64; index += 1)
+				expect(internal.deferFailureUntilInputDisposition(lifecycle.id, () => { callbacks += 1; })).toBe(true);
+			expect(callbacks).toBe(0);
+			expect(lifecycle.fallbacks).toHaveLength(64);
+			expect(lifecycle.fallbackOverflow).toBe(true);
+			internal.setInputNotificationStatus(lifecycle.id, "released");
+			expect(callbacks).toBe(64);
+			expect(lifecycle.fallbackOverflow).toBe(false);
 		}),
 );
 serial(

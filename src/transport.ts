@@ -31,6 +31,8 @@ async function exchange(
 	timeoutMs: number,
 	deadlineAt?: number,
 	signal?: AbortSignal,
+	/** Returns false when cancellation/expiry fenced this request before its write. */
+	markDispatched: () => boolean = () => true,
 	fingerprint: (
 		candidate: string,
 	) => Promise<SocketFingerprint> = safeSocketFingerprint,
@@ -180,15 +182,25 @@ async function exchange(
 						// become ambiguous by writing after its deadline.
 						if (expired())
 							return finish(new PresenceTransportError("Socket request timed out."));
+						if (signal?.aborted) return abort();
+						try {
+							socket?.write(line, (error) => {
+								if (error)
+									finish(
+										new PresenceTransportError(
+											`Socket write failed: ${error.message}`,
+										),
+									);
+							});
+						} catch (error) {
+							return finish(error instanceof Error
+								? new PresenceTransportError(`Socket write failed: ${error.message}`)
+								: new PresenceTransportError("Socket write failed."));
+						}
+						// `write()` accepted the complete line synchronously. This is the
+						// only point at which notification delivery becomes ambiguous.
+						if (!markDispatched()) return abort();
 						writeDispatched = true;
-						socket?.write(line, (error) => {
-							if (error)
-								finish(
-									new PresenceTransportError(
-										`Socket write failed: ${error.message}`,
-									),
-								);
-						});
 					} catch (error) {
 						finish(
 							error instanceof Error
@@ -209,17 +221,25 @@ async function exchange(
 }
 
 export type QueueLane = "protected" | "actionable" | "replaceable";
+export type QueueReleaseReason = "timed_out" | "cancelled" | "pre_dispatch_failure" | "coalesced" | "priority_cleanup" | "actionable_displacement" | "closed";
+export type QueueDisposition =
+	| { status: "dispatched" }
+	| { status: "released"; reason: QueueReleaseReason };
 
 interface Pending {
 	key?: string;
 	lane: QueueLane;
-	work: (signal: AbortSignal) => Promise<string>;
+	work: (signal: AbortSignal, markDispatched: () => boolean) => Promise<string>;
 	promise: Promise<string>;
 	resolve: (value: string) => void;
 	reject: (error: unknown) => void;
 	settled: boolean;
 	deadlineAt?: number;
 	timer?: ReturnType<typeof setTimeout>;
+	disposition?: (disposition: QueueDisposition) => void;
+	/** Set only at the physical socket-write boundary. */
+	dispatched: boolean;
+	disposed: boolean;
 }
 
 type Active = {
@@ -227,6 +247,7 @@ type Active = {
 	item: Pending;
 	settled: Promise<void>;
 	release: () => void;
+	timer?: ReturnType<typeof setTimeout>;
 };
 
 /** A bounded latest-write-wins queue with optional end-to-end deadlines. Superseded callers settle immediately. */
@@ -260,11 +281,36 @@ export class BoundedSocketQueue {
 		item.reject(error);
 	}
 
+	private admission(callback: ((admitted: boolean) => void) | undefined, admitted: boolean) {
+		try { callback?.(admitted); } catch { /* user callbacks cannot poison queue state */ }
+	}
+
 	private failed(error: Error, onAdmission?: (admitted: boolean) => void): Promise<string> {
-		onAdmission?.(false);
+		this.admission(onAdmission, false);
 		const promise = Promise.reject<string>(error);
 		void promise.catch(() => {});
 		return promise;
+	}
+
+	/**
+	 * Detach state before scheduling user code. A microtask ensures a callback
+	 * cannot observe an in-progress coalesce, displacement, close, or admission.
+	 */
+	private dispose(item: Pending, disposition: QueueDisposition) {
+		if (item.disposed) return;
+		item.disposed = true;
+		this.clearDeadline(item);
+		queueMicrotask(() => {
+			try { item.disposition?.(disposition); } catch { /* callback failures are output-only */ }
+		});
+	}
+
+	private releaseBeforeDispatch(item: Pending, error: Error, reason: QueueReleaseReason) {
+		const index = this.queue.indexOf(item);
+		if (index >= 0) this.queue.splice(index, 1);
+		if (item.key && this.keyed.get(item.key) === item) this.keyed.delete(item.key);
+		this.reject(item, error);
+		this.dispose(item, { status: "released", reason });
 	}
 
 	private expire(item: Pending) {
@@ -277,16 +323,24 @@ export class BoundedSocketQueue {
 				item,
 				new PresenceTransportError("Socket request timed out."),
 			);
+			if (!item.dispatched)
+				this.dispose(item, { status: "released", reason: "timed_out" });
 			return;
 		}
 
-		const index = this.queue.indexOf(item);
-		if (index < 0) return;
+		if (!this.queue.includes(item)) return;
+		this.releaseBeforeDispatch(
+			item,
+			new PresenceTransportError("Socket request timed out."),
+			"timed_out",
+		);
+	}
 
-		this.queue.splice(index, 1);
-		if (item.key && this.keyed.get(item.key) === item)
-			this.keyed.delete(item.key);
-		this.reject(item, new PresenceTransportError("Socket request timed out."));
+	/** Whether a keyed request can still be cancelled before its physical write. */
+	canCancelBeforeDispatch(key: string): boolean {
+		const active = this.active;
+		if (active?.item.key === key) return !active.item.dispatched;
+		return this.keyed.has(key);
 	}
 
 	/** Abort a keyed request and expose only active actual-work settlement as a dispatch barrier. */
@@ -299,6 +353,8 @@ export class BoundedSocketQueue {
 				active.item,
 				new PresenceTransportError("Socket request cancelled."),
 			);
+			if (!active.item.dispatched)
+				this.dispose(active.item, { status: "released", reason: "cancelled" });
 			settled = active.settled;
 		}
 
@@ -307,15 +363,16 @@ export class BoundedSocketQueue {
 		const item = this.keyed.get(key);
 		if (!item || item === active?.item) return settled;
 
-		const index = this.queue.indexOf(item);
-		if (index >= 0) this.queue.splice(index, 1);
-		if (this.keyed.get(key) === item) this.keyed.delete(key);
-		this.reject(item, new PresenceTransportError("Socket request cancelled."));
+		this.releaseBeforeDispatch(
+			item,
+			new PresenceTransportError("Socket request cancelled."),
+			"cancelled",
+		);
 		return settled;
 	}
 
 	enqueue(
-		work: (signal: AbortSignal) => Promise<string>,
+		work: (signal: AbortSignal, markDispatched: () => boolean) => Promise<string>,
 		key?: string,
 		priority = false,
 		deadlineAt?: number,
@@ -323,6 +380,10 @@ export class BoundedSocketQueue {
 		lane: QueueLane = "replaceable",
 		/** Called synchronously: true only after this exact item enters the queue. */
 		onAdmission?: (admitted: boolean) => void,
+		/** Exactly once after admission: dispatch or release before physical dispatch. */
+		onDisposition?: (disposition: QueueDisposition) => void,
+		/** Actionable callers opt into a finite residency deadline; legacy actionable work remains compatible. */
+		queueDeadlineAt?: number,
 	): Promise<string> {
 		if (this.closed)
 			return this.failed(new PresenceTransportError("Socket queue is closed."), onAdmission);
@@ -388,22 +449,20 @@ export class BoundedSocketQueue {
 		if (prior) {
 			const index = this.queue.indexOf(prior);
 			if (index >= 0) this.queue.splice(index, 1);
-			this.keyed.delete(key!);
-			this.reject(
+			this.releaseBeforeDispatch(
 				prior,
 				new PresenceTransportError("Socket queue coalesced by newer request."),
+				"coalesced",
 			);
 		}
 
 		if (priority) {
 			// Cleanup remains the sole flush-all admission path.
-			for (const displaced of this.queue.splice(0)) {
-				if (displaced.key) this.keyed.delete(displaced.key);
-				this.reject(
+			for (const displaced of [...this.queue]) {
+				this.releaseBeforeDispatch(
 					displaced,
-					new PresenceTransportError(
-						"Socket queue displaced by priority cleanup.",
-					),
+					new PresenceTransportError("Socket queue displaced by priority cleanup."),
+					"priority_cleanup",
 				);
 			}
 		} else if (this.queue.length >= this.limit) {
@@ -415,14 +474,12 @@ export class BoundedSocketQueue {
 				: -1;
 			if (replaceable < 0)
 				return this.failed(new PresenceTransportError("Socket queue is full."), onAdmission);
-			const [displaced] = this.queue.splice(replaceable, 1);
-			if (displaced?.key) this.keyed.delete(displaced.key);
+			const displaced = this.queue[replaceable];
 			if (displaced)
-				this.reject(
+				this.releaseBeforeDispatch(
 					displaced,
-					new PresenceTransportError(
-						"Socket queue displaced by actionable notification.",
-					),
+					new PresenceTransportError("Socket queue displaced by actionable notification."),
+					"actionable_displacement",
 				);
 		}
 
@@ -442,7 +499,10 @@ export class BoundedSocketQueue {
 			resolve,
 			reject,
 			settled: false,
-			deadlineAt: lane === "actionable" ? undefined : deadlineAt,
+			deadlineAt: lane === "actionable" ? queueDeadlineAt : deadlineAt,
+			disposition: onDisposition,
+			dispatched: false,
+			disposed: false,
 		};
 		if (item.deadlineAt !== undefined) {
 			item.timer = setTimeout(
@@ -455,7 +515,7 @@ export class BoundedSocketQueue {
 		if (priority) this.queue.unshift(item);
 		else this.queue.push(item);
 		if (key) this.keyed.set(key, item);
-		onAdmission?.(true);
+		this.admission(onAdmission, true);
 		this.start();
 		return promise;
 	}
@@ -472,17 +532,14 @@ export class BoundedSocketQueue {
 	private async drain() {
 		while (!this.closed && this.queue.length) {
 			const item = this.queue.shift()!;
-			if (item.key) this.keyed.delete(item.key);
+			if (item.key && this.keyed.get(item.key) === item) this.keyed.delete(item.key);
 			if (item.deadlineAt !== undefined && item.deadlineAt <= Date.now()) {
-				this.reject(
-					item,
-					new PresenceTransportError("Socket request timed out."),
-				);
+				this.reject(item, new PresenceTransportError("Socket request timed out."));
+				this.dispose(item, { status: "released", reason: "timed_out" });
 				continue;
 			}
-
 			let release!: () => void;
-			const active = {
+			const active: Active = {
 				control: new AbortController(),
 				item,
 				settled: new Promise<void>((resolve) => {
@@ -490,12 +547,34 @@ export class BoundedSocketQueue {
 				}),
 				release,
 			};
+			// The item is active (but no longer keyed) before physical dispatch. Its
+			// queue-age timer remains live through fingerprinting, connect, and the
+			// final pre-write validation.
 			this.active = active;
+			const markDispatched = () => {
+				if (this.active !== active || this.closed || active.control.signal.aborted || item.settled)
+					return false;
+				item.dispatched = true;
+				this.dispose(item, { status: "dispatched" });
+				return true;
+			};
 			try {
-				this.resolve(item, await item.work(active.control.signal));
+				if (this.closed || active.control.signal.aborted) {
+					if (!item.settled)
+						this.reject(item, new PresenceTransportError("Socket request cancelled."));
+					if (!item.dispatched)
+						this.dispose(item, { status: "released", reason: "cancelled" });
+					continue;
+				}
+				this.resolve(item, await item.work(active.control.signal, markDispatched));
 			} catch (error) {
 				this.reject(item, error);
 			} finally {
+				// A work function that failed, was aborted, or returned without reaching
+				// its explicit physical-write marker never committed its reservation.
+				if (!item.dispatched && !item.disposed)
+					this.dispose(item, { status: "released", reason: "pre_dispatch_failure" });
+				if (active.timer) clearTimeout(active.timer);
 				active.release();
 				if (this.active === active) this.active = null;
 			}
@@ -508,18 +587,22 @@ export class BoundedSocketQueue {
 		this.closed = true;
 		const active = this.active;
 		if (active) {
+			if (active.timer) clearTimeout(active.timer);
 			active.control.abort();
 			this.reject(
 				active.item,
 				new PresenceTransportError("Socket queue closed during active work."),
 			);
+			if (!active.item.dispatched)
+				this.dispose(active.item, { status: "released", reason: "closed" });
 			if (this.active === active) this.active = null;
 		}
 
-		for (const item of this.queue.splice(0)) {
-			this.reject(
+		for (const item of [...this.queue]) {
+			this.releaseBeforeDispatch(
 				item,
 				new PresenceTransportError("Socket queue closed before dispatch."),
+				"closed",
 			);
 		}
 		this.keyed.clear();
@@ -566,13 +649,17 @@ export class HerdrSocketTransport {
 		lane: QueueLane = "replaceable",
 		/** Synchronous queue-admission receipt; post-dispatch delivery remains unknown. */
 		onAdmission?: (admitted: boolean) => void,
+		/** Queue lifetime disposition; active delivery failure is intentionally absent. */
+		onDisposition?: (disposition: QueueDisposition) => void,
+		/** Optional finite actionable residency deadline. */
+		actionableQueueDeadlineAt?: number,
 	) {
 		const queuedAt = Date.now();
 		// Protected and replaceable lifecycle work retains its caller-owned absolute
 		// deadline. An actionable toast instead reserves bounded queue capacity until
 		// dispatch, then receives its own full socket attempt.
 		const queueDeadlineAt = lane === "actionable"
-			? undefined
+			? actionableQueueDeadlineAt
 			: Math.min(deadlineAt, queuedAt + timeoutMs);
 		if (
 			!Number.isFinite(timeoutMs) ||
@@ -580,13 +667,13 @@ export class HerdrSocketTransport {
 			(queueDeadlineAt !== undefined &&
 				(!Number.isFinite(queueDeadlineAt) || queueDeadlineAt <= queuedAt))
 		) {
-			onAdmission?.(false);
+			try { onAdmission?.(false); } catch { /* admission observers are output-only */ }
 			const failed = Promise.reject<string>(new PresenceTransportError("Socket request timed out."));
 			void failed.catch(() => {});
 			return failed;
 		}
 		return this.queue.enqueue(
-			(signal) => {
+			(signal, markDispatched) => {
 				const dispatchedAt = Date.now();
 				const attemptDeadlineAt = lane === "actionable"
 					? dispatchedAt + timeoutMs
@@ -600,6 +687,7 @@ export class HerdrSocketTransport {
 					remaining,
 					attemptDeadlineAt,
 					signal,
+					markDispatched,
 					this.fingerprint,
 				);
 			},
@@ -609,7 +697,13 @@ export class HerdrSocketTransport {
 			preemptKeys,
 			lane,
 			onAdmission,
+			onDisposition,
+			queueDeadlineAt,
 		);
+	}
+
+	canCancelBeforeDispatch(key: string): boolean {
+		return this.queue.canCancelBeforeDispatch(key);
 	}
 
 	cancel(key: string): Promise<void> | undefined {

@@ -16,7 +16,7 @@ import {
 	type HerdrMethod,
 	type HerdrPresentation,
 } from "./protocol.js";
-import { HerdrSocketTransport, PresenceTransportError, type QueueLane } from "./transport.js";
+import { HerdrSocketTransport, PresenceTransportError, type QueueDisposition, type QueueLane } from "./transport.js";
 import { processCoordinator } from "./process-coordinator.js";
 import { hasControlOrBidi } from "./validation.js";
 
@@ -56,6 +56,8 @@ export class PresenceClient {
 	private ordinaryInFlight = new Map<"agent" | "metadata", { signature: string; promise: Promise<void> }>();
 	/** Notification work is cancellable synchronously at lifecycle fences. */
 	private outstandingNotificationKeys = new Map<string, number>();
+	/** Bounded residency prevents an actionable toast from surviving a stuck active exchange forever. */
+	private readonly notificationQueueDeadlineMs: number;
 	constructor(
 		private readonly identity: HerdrIdentity,
 		private readonly transport: HerdrSocketTransport,
@@ -63,7 +65,12 @@ export class PresenceClient {
 		private readonly mode: Exclude<PresenceMode, "disabled"> = "standalone",
 		/** Injectable only for deterministic projection-freshness tests. */
 		private readonly clock: () => number = Date.now,
-	) {}
+	) {
+		this.notificationQueueDeadlineMs = Math.min(
+			30_000,
+			Math.max(1_000, config.timeoutMs * (config.maxQueue + 1)),
+		);
+	}
 	private get companion(): boolean {
 		return this.mode === "companion";
 	}
@@ -351,6 +358,7 @@ export class PresenceClient {
 		body: string,
 		options: NotificationOptions,
 		key = "default",
+		onDisposition?: (disposition: QueueDisposition) => void,
 	): boolean {
 		if (!this.config.notifications || this.closed || this.closing) return false;
 		const id = `${this.metadataSource}:${++this.requestNumber}`;
@@ -387,6 +395,8 @@ export class PresenceClient {
 					);
 				}
 			},
+			onDisposition,
+			options.actionable ? Date.now() + this.notificationQueueDeadlineMs : undefined,
 		);
 		// Once queued, delivery may fail after dispatch. Validate a settled response
 		// only for protocol containment; it must never alter admission or retry.
@@ -407,6 +417,13 @@ export class PresenceClient {
 			else this.outstandingNotificationKeys.set(transportKey, count - 1);
 		}).catch(() => {});
 		return receivedAdmission && admitted;
+	}
+	/** Atomically cancel exactly one lifecycle-owned notification before its physical write. */
+	cancelNotification(key: string): boolean {
+		const transportKey = `notification:${key}`;
+		if (!this.transport.canCancelBeforeDispatch(transportKey)) return false;
+		this.transport.cancel(transportKey);
+		return true;
 	}
 	/** Herdr's existing authority clear is priority cleanup and is never retried. */
 	private async clearAgentAuthority(deadlineAt?: number): Promise<void> {

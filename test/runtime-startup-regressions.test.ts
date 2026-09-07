@@ -652,7 +652,7 @@ serial("startup native failure/input ordering remains bounded at maxQueue=1", as
   }
 });
 
-serial("startup input admission survives withdrawal before a nearby failure", async () => {
+serial("startup pre-dispatch input withdrawal cancels its stale alert and releases nearby failure fallback", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-input-ended-failure-"));
   const socket = join(directory, "socket");
   const requests: Request[] = [];
@@ -686,7 +686,7 @@ serial("startup input admission survives withdrawal before a nearby failure", as
     await starting;
     await pause(30);
 
-    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs your input"]);
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs attention"]);
     expect((runtime as unknown as { failureArrivals: unknown[]; inputLifecycles: unknown[] }).failureArrivals).toEqual([]);
     expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
   } finally {
@@ -722,10 +722,10 @@ serial("startup rejected input lifecycle does not inherit an older admitted rece
   try {
     Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
     registerPresenceHooks(bus as never, runtime);
-    const internal = runtime as unknown as { notify(severity: string, key: string, title: string, body: string, origin: "local" | "external"): boolean };
+    const internal = runtime as unknown as { notify(severity: string, key: string, title: string, body: string, origin: "local" | "external", inputLifecycleId?: number | null): boolean };
     const notify = internal.notify.bind(runtime);
     let inputAttempts = 0;
-    internal.notify = (severity, key, title, body, origin) => severity === "attention" && ++inputAttempts > 1 ? false : notify(severity, key, title, body, origin);
+    internal.notify = (severity, key, title, body, origin, inputLifecycleId) => severity === "attention" && ++inputAttempts > 1 ? false : notify(severity, key, title, body, origin, inputLifecycleId);
     const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
     const starting = runtime.startSession(context);
     await seenReport;
@@ -740,7 +740,9 @@ serial("startup rejected input lifecycle does not inherit an older admitted rece
     await starting;
     await pause(30);
 
-    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+    // Both short prompts ended while their input requests were still queued;
+    // neither stale toast reaches the socket, and the nearby failure stays live.
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs attention"]);
     expect((runtime as unknown as { failureArrivals: unknown[]; inputLifecycles: unknown[] }).failureArrivals).toEqual([]);
     expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
   } finally {

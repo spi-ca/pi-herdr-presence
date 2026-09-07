@@ -125,10 +125,33 @@ describe("transport integration: real Unix sockets", () => {
 			1,
 			changingFingerprint,
 		);
-		await expect(transport.request("request\n")).rejects.toThrow(
+		const dispositions: string[] = [];
+		await expect(transport.request("request\n", undefined, false, 100, undefined, undefined, "actionable", undefined, (value) => dispositions.push(value.status))).rejects.toThrow(
 			"changed during connection",
 		);
 		expect(calls).toBe(2);
+		expect(dispositions).toEqual(["released"]);
+		await transport.close();
+	});
+
+	test("contains a throwing early admission rejection callback", async () => {
+		const transport = new HerdrSocketTransport(await temporarySocketPath("throwing-early-admission"), 100, 1, fixedFingerprint);
+		let callbackCalls = 0;
+		const request = transport.request(
+			"request\n",
+			undefined,
+			false,
+			0,
+			undefined,
+			undefined,
+			"actionable",
+			() => {
+				callbackCalls += 1;
+				throw new Error("admission observer");
+			},
+		);
+		await expect(request).rejects.toThrow("timed out");
+		expect(callbackCalls).toBe(1);
 		await transport.close();
 	});
 
@@ -140,6 +163,38 @@ describe("transport integration: real Unix sockets", () => {
 			"Socket failure:",
 		);
 		await transport.close();
+	});
+
+	test("reports release before write but keeps commitment after malformed response or timeout", async () => {
+		const preconnect = new HerdrSocketTransport(
+			await temporarySocketPath("preconnect-release"),
+			100,
+			1,
+			async () => { throw new Error("fingerprint failed"); },
+		);
+		const preconnectDisposition: string[] = [];
+		await expect(preconnect.request("request\n", undefined, false, 100, undefined, undefined, "actionable", undefined, (value) => preconnectDisposition.push(value.status === "released" ? value.reason : value.status))).rejects.toThrow("fingerprint failed");
+		expect(preconnectDisposition).toEqual(["pre_dispatch_failure"]);
+		await preconnect.close();
+
+		const refusedDisposition: string[] = [];
+		const refused = new HerdrSocketTransport(await temporarySocketPath("refused-release"), 100, 1, fixedFingerprint);
+		await expect(refused.request("request\n", undefined, false, 100, undefined, undefined, "actionable", undefined, (value) => refusedDisposition.push(value.status === "released" ? value.reason : value.status))).rejects.toThrow("Socket failure:");
+		expect(refusedDisposition).toEqual(["pre_dispatch_failure"]);
+		await refused.close();
+
+		for (const [name, respond] of [
+			["malformed-after-write", (socket: net.Socket) => socket.end("one\ntwo\n")],
+			["timeout-after-write", (_socket: net.Socket) => {}],
+		] as const) {
+			const path = await temporarySocketPath(name);
+			await listen(path, (socket) => readRequest(socket, () => respond(socket)));
+			const transport = new HerdrSocketTransport(path, 20, 1, fixedFingerprint);
+			const dispositions: string[] = [];
+			await expect(transport.request("request\n", undefined, false, 20, undefined, undefined, "actionable", undefined, (value) => dispositions.push(value.status))).rejects.toThrow();
+			expect(dispositions).toEqual(["dispatched"]);
+			await transport.close();
+		}
 	});
 
 	test("uses each attempt deadline instead of consuming a later retry's lifecycle reserve", async () => {
@@ -304,6 +359,133 @@ describe("transport module: queue and deadline behavior", () => {
 		await expect(active).resolves.toBe("active");
 		await expect(protectedPending).resolves.toBe("protected");
 		await queue.close();
+	});
+
+	test("expires actionable queue residency behind abort-unaware active work without dispatching it", async () => {
+		const queue = new BoundedSocketQueue(1);
+		let releaseActive!: () => void;
+		let started = false;
+		const dispositions: string[] = [];
+		const active = queue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releaseActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const notification = queue.enqueue(
+			async () => { started = true; return "notification"; },
+			"notification",
+			false,
+			undefined,
+			undefined,
+			"actionable",
+			undefined,
+			(disposition) => {
+				dispositions.push(disposition.status === "released" ? disposition.reason : disposition.status);
+				throw new Error("expiry callback");
+			},
+			Date.now() + 15,
+		);
+		await expect(notification).rejects.toThrow("timed out");
+		expect(started).toBe(false);
+		expect(dispositions).toEqual(["timed_out"]);
+		releaseActive();
+		await expect(active).resolves.toBe("active");
+		await queue.close();
+	});
+
+	test("reports one pre-dispatch disposition across coalesce, cancellation, and close", async () => {
+		const queue = new BoundedSocketQueue(3);
+		let releaseActive!: () => void;
+		const seen: string[] = [];
+		const active = queue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releaseActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const observe = (name: string) => (disposition: { status: string; reason?: string }) => seen.push(`${name}:${disposition.reason ?? disposition.status}`);
+		const old = queue.enqueue(async () => "old", "same", false, undefined, undefined, "actionable", undefined, observe("old"));
+		const current = queue.enqueue(async () => "current", "same", false, undefined, undefined, "actionable", undefined, observe("current"));
+		const cancelled = queue.enqueue(async () => "cancelled", "cancelled", false, undefined, undefined, "actionable", undefined, observe("cancelled"));
+		queue.cancel("cancelled");
+		const closed = queue.enqueue(async () => "closed", "closed", false, undefined, undefined, "actionable", undefined, observe("closed"));
+		await queue.close();
+		await expect(old).rejects.toThrow("coalesced");
+		await expect(current).rejects.toThrow("closed before dispatch");
+		await expect(cancelled).rejects.toThrow("cancelled");
+		await expect(closed).rejects.toThrow("closed before dispatch");
+		expect(seen.sort()).toEqual(["cancelled:cancelled", "closed:closed", "current:closed", "old:coalesced"]);
+		releaseActive();
+		await expect(active).rejects.toThrow("closed during active work");
+	});
+
+	test("contains throwing and reentrant disposition callbacks without orphaning drain state", async () => {
+		const queue = new BoundedSocketQueue(3);
+		let releaseActive!: () => void;
+		const active = queue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releaseActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const cancelled = queue.enqueue(async () => "cancelled", "cancelled", false, undefined, undefined, "actionable", undefined, () => { throw new Error("cancel callback"); });
+		const closed = queue.enqueue(async () => "closed", "closed", false, undefined, undefined, "actionable", undefined, () => { queue.cancel("cancelled"); throw new Error("close callback"); });
+		queue.cancel("cancelled");
+		await queue.close();
+		await expect(cancelled).rejects.toThrow("cancelled");
+		await expect(closed).rejects.toThrow("closed before dispatch");
+		releaseActive();
+		await expect(active).rejects.toThrow("closed during active work");
+
+		const dispatchQueue = new BoundedSocketQueue(1);
+		const dispatched = dispatchQueue.enqueue(async (_signal, markDispatched) => {
+			expect(markDispatched()).toBe(true);
+			return "written";
+		}, "dispatched", false, undefined, undefined, "actionable", undefined, () => {
+			dispatchQueue.cancel("dispatched");
+			throw new Error("dispatch callback");
+		});
+		await expect(dispatched).rejects.toThrow("cancelled");
+		await dispatchQueue.close();
+	});
+
+	test("defers throwing reentrant coalesce and priority callbacks until their replacements are fully owned", async () => {
+		const queue = new BoundedSocketQueue(3);
+		let releaseActive!: () => void;
+		const active = queue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releaseActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		let callbackAdmission: Promise<string> | undefined;
+		const old = queue.enqueue(async () => "old", "same", false, undefined, undefined, "actionable", undefined, () => {
+			void queue.close();
+			callbackAdmission = queue.enqueue(async () => "late");
+			throw new Error("coalesce callback");
+		});
+		const replacement = queue.enqueue(async () => "replacement", "same", false, undefined, undefined, "actionable");
+		await expect(old).rejects.toThrow("coalesced");
+		await Promise.resolve();
+		await expect(replacement).rejects.toThrow("closed before dispatch");
+		await expect(callbackAdmission!).rejects.toThrow("queue is closed");
+		releaseActive();
+		await expect(active).rejects.toThrow("closed during active work");
+
+		const priorityQueue = new BoundedSocketQueue(3);
+		let releasePriorityActive!: () => void;
+		const priorityActive = priorityQueue.enqueue(async () => {
+			await new Promise<void>((resolve) => { releasePriorityActive = resolve; });
+			return "active";
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const displaced = priorityQueue.enqueue(async () => "displaced", "displaced", false, undefined, undefined, "actionable", undefined, () => {
+			void priorityQueue.close();
+			throw new Error("priority callback");
+		});
+		const priority = priorityQueue.enqueue(async () => "priority", "priority", true, undefined, undefined, "protected");
+		await expect(displaced).rejects.toThrow("priority cleanup");
+		await Promise.resolve();
+		await expect(priority).rejects.toThrow("closed before dispatch");
+		releasePriorityActive();
+		await expect(priorityActive).rejects.toThrow("closed during active work");
 	});
 
 	test("continues FIFO dispatch after an active request fails", async () => {
@@ -894,6 +1076,23 @@ describe("transport integration: fingerprint deadlines", () => {
 		await expect(transport.request("request\n")).rejects.toThrow("timed out");
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(connections).toBe(0);
+		await transport.close();
+	});
+
+	test("keeps actionable residency live through post-connect validation and never writes after expiry", async () => {
+		const path = await temporarySocketPath("actionable-postconnect-residency");
+		let writes = 0;
+		await listen(path, (socket) => readRequest(socket, () => { writes += 1; socket.end("ok\n"); }));
+		let calls = 0;
+		const transport = new HerdrSocketTransport(path, 100, 1, async () => {
+			calls += 1;
+			if (calls === 2) await new Promise((resolve) => setTimeout(resolve, 30));
+			return { dev: 1, ino: 1, uid: 1 };
+		});
+		const dispositions: string[] = [];
+		await expect(transport.request("request\n", undefined, false, 100, undefined, undefined, "actionable", undefined, (value) => dispositions.push(value.status), Date.now() + 10)).rejects.toThrow("timed out");
+		expect(dispositions).toEqual(["released"]);
+		expect(writes).toBe(0);
 		await transport.close();
 	});
 

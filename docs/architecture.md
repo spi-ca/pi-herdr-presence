@@ -30,7 +30,9 @@ flowchart LR
 | `src/transport.ts` | One-request-per-connection Unix-socket exchange, validation, bounded queue, deadlines, and priority cleanup | Request meaning or authority |
 | `src/config.ts`, `src/official-hook.ts`, `src/identity.ts` | Configuration parsing, managed-marker detection, and Herdr identity/socket safety | Runtime output after an ambiguous result |
 | `src/todo.ts` | One stable Todo owner; structural traversal of `params`/`error` within depth, field, and array-count bounds (not string-byte bounds); task count and allowed-key checks; derives only IDs, statuses, and counts | Traversing ignored task-field values or copying, interpreting, retaining, or projecting task text, arguments, or nested values |
-| `src/notification-policy.ts` | Fixed-text notification policy, deduplication, and rate limits | Producer-provided notification content |
+| `src/notification-policy.ts` | Fixed-text notification policy plus bounded transactional dedupe/rate reservations | Producer-provided notification content |
+
+Actionable notifications reserve bounded dedupe/rate capacity at synchronous queue admission. `BoundedSocketQueue` reports one later disposition after it detaches keyed/timer state: `timed_out`, `cancelled`, `pre_dispatch_failure`, `coalesced`, `priority_cleanup`, `actionable_displacement`, and `closed` release the reservation. `pre_dispatch_failure` covers fingerprint, validation, connection, and other pre-write failures. Only a successful physical `socket.write()` commits the reservation; all later outcomes are delivery-unknown and are neither retried nor rolled back. Runtime callbacks are fenced to the captured epoch/client. Input lifecycles retain their exact notification key and a bounded same-session failure fallback only while their input alert is pending; dispatch drops it, while ending a pre-write lifecycle cancels that exact key and a release invokes the fallback after reservation rollback.
 
 ## Startup and ordinary projection
 
