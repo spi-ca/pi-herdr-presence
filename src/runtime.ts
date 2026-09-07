@@ -1168,16 +1168,23 @@ export class PresenceRuntime {
     lifecycle.admitted = admitted;
   }
 
-  /** A live failure joins only a currently active aggregate lifecycle. */
-  private associatedInputLifecycle(_acceptedAt: number): number | undefined {
-    return this.inputLifecycle(this.currentInputLifecycleId)?.id;
+  /** A live failure joins an active lifecycle only at its bounded acceptance edge. */
+  private associatedInputLifecycle(acceptedAt: number): number | undefined {
+    const lifecycle = this.inputLifecycle(this.currentInputLifecycleId);
+    return lifecycle && acceptedAt >= lifecycle.acceptedAt && acceptedAt - lifecycle.acceptedAt <= INPUT_FAILURE_WINDOW_MS
+      ? lifecycle.id
+      : undefined;
   }
 
-  /** A just-ended lifecycle remains eligible only if no newer lifecycle claimed the failure. */
+  /** A just-ended lifecycle remains eligible only at both of its bounded edges. */
   private recentInputLifecycleForFailure(acceptedAt: number): number | undefined {
     for (let index = this.inputLifecycles.length - 1; index >= 0; index -= 1) {
       const lifecycle = this.inputLifecycles[index]!;
-      if (lifecycle.endedAt !== undefined && acceptedAt >= lifecycle.endedAt && acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS)
+      if (lifecycle.endedAt !== undefined
+        && acceptedAt >= lifecycle.acceptedAt
+        && acceptedAt - lifecycle.acceptedAt <= INPUT_FAILURE_WINDOW_MS
+        && acceptedAt >= lifecycle.endedAt
+        && acceptedAt - lifecycle.endedAt <= INPUT_FAILURE_WINDOW_MS)
         return lifecycle.id;
     }
     return undefined;
