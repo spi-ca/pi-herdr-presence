@@ -93,7 +93,14 @@ test("the reviewed managed Herdr marker enables bounded companion presentation r
     for (const listener of hooks.get("session_start") ?? []) await listener({ reason: "startup" }, context);
     await eventually(() => expect(blockedEvents).toEqual([{ active: true, label: "Pi needs your input" }]));
     await eventually(() => expect(requests.some((request) => request.method === "pane.report_agent" && request.params.source === "herdr:pi" && request.params.state === "blocked" && request.params.message === "Pi needs your input")).toBe(true));
-    await eventually(() => expect(requests.some((request) => request.method === "pane.report_metadata" && request.params.source === "herdr:pi-presence")).toBe(true));
+    await eventually(() => expect(requests.some((request) => {
+      const tokens = request.params.tokens as Record<string, unknown> | undefined;
+      return request.method === "pane.report_metadata"
+        && request.params.source === "herdr:pi-presence"
+        && request.params.display_agent === "Pi"
+        && typeof tokens?.summary === "string"
+        && request.params.title === `Pi · ${tokens.summary}`;
+    })).toBe(true));
     const companion = requests.filter((request) => request.params.source === "herdr:pi-presence");
     expect(companion.every((request) => request.method === "pane.report_metadata")).toBe(true);
     expect(companion.every((request) => request.params.applies_to_source === "herdr:pi")).toBe(true);

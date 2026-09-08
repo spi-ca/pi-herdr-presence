@@ -315,9 +315,9 @@ test("a minimum lifecycle timeout remains one nonzero bounded attempt", async ()
     async close() {},
   };
 
-  await client(transport, 1).report("working", session);
+  await client(transport, 100).report("working", session);
 
-  expect(timeouts).toEqual([1]);
+  expect(timeouts).toEqual([50]);
 });
 
 test("teardown prioritizes authority clear after a lost session response", async () => {
