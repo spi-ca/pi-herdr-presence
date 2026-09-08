@@ -1,6 +1,6 @@
 # Herdr event contract
 
-This is the authoritative Herdr wire-projection contract. [Architecture](architecture.md) describes ordering; [configuration](configuration.md) defines activation and lease eligibility; [feature ownership](feature-ownership.md) defines the authority boundary.
+This is the authoritative Herdr wire-projection contract. [Architecture](architecture.md) describes ordering; [configuration](configuration.md) defines activation and lease eligibility; [feature ownership](feature-ownership.md) defines the authority boundary. The current Herdr target is application `v0.9.0`, protocol `22`; this is separate from managed integration asset `HERDR_INTEGRATION_VERSION=8`.
 
 The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/fixtures/normative.json).
 
@@ -45,7 +45,9 @@ workspace_id, source: "herdr:pi-presence", seq, ttl_ms: 30000,
 tokens: { main_summary }
 ```
 
-It accepts only the exact `{ type: "ok" }` response. `main_summary` must use the same canonical bounded summary grammar as pane `summary`; no presentation fields or additional tokens are accepted. Each attempt first validates a bounded `pane.list` response scoped to the same workspace. Every PaneInfo row has exactly `pane_id`, `terminal_id`, `workspace_id`, `tab_id`, `focused`, `agent_status`, and `revision`, with only nullable/optional `agent` additionally permitted; pane IDs must be unique. It writes only if this runtime is the sole reported `agent: "pi"` pane.
+It accepts only the exact `{ type: "ok" }` response. `main_summary` must use the same canonical bounded summary grammar as pane `summary`; no presentation fields or additional tokens are accepted. Each attempt first validates a `v0.9.0` protocol-`22`, workspace-scoped `pane.list` response. A row has an exact allowlist of fields that Herdr `v0.9.0` serializes: required `pane_id`, `terminal_id`, `workspace_id`, `tab_id`, `focused`, `agent_status`, and `revision`; optional `cwd`, `foreground_cwd`, `label`, `agent`, `title`, `terminal_title`, `terminal_title_stripped`, `display_agent`, `state_labels`, `tokens`, `agent_session`, and `scroll`. Unknown fields are rejected, even if another schema might allow additional properties. The validator admits schema-valid omissions and nullable fields, including an absent or `null` `agent`, only after bounded validation. The snapshot is locally bounded to `128` rows, unique pane IDs, bounded strings and nested values, and at most `32` entries in each accepted `state_labels` or `tokens` map. A malformed, oversized, or out-of-scope snapshot fails closed and produces no workspace write.
+
+Validation is an admission check, not extra selection logic. Once admitted, sole-Pi eligibility uses only `agent` and `pane_id`: exactly one row with `agent: "pi"` must be present, and that row's `pane_id` must equal this runtime's pane ID. An absent or `null` `agent` is admitted but is not Pi. The outgoing workspace lease remains exactly the envelope shown above; optional `PaneInfo` fields are never copied into it.
 
 The next attempt occurs 10 seconds after the prior attempt completes, not on every pane update. A list and write each have one five-second, no-retry budget. Workspace tokens are not source-cleared: ineligibility, error, replacement, and teardown let the 30-second TTL expire instead.
 

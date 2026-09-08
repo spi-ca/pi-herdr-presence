@@ -38,7 +38,8 @@ export const WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS = 10_000;
 export const WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS = 5_000;
 const exactTokens = (tokens: Record<string, unknown>, keys: readonly string[]) => Object.keys(tokens).length === keys.length && keys.every(key => Object.hasOwn(tokens, key));
 const exactOwnedTokens = (tokens: Record<string, unknown>) => exactTokens(tokens, HERDR_METADATA_TOKEN_KEYS);
-const safeText = (v: unknown, max = 512): v is string => typeof v === "string" && v.length > 0 && Buffer.byteLength(v, "utf8") <= max && !hasControlOrBidi(v);
+const safeBoundedText = (v: unknown, max = 512): v is string => typeof v === "string" && Buffer.byteLength(v, "utf8") <= max && !hasControlOrBidi(v);
+const safeText = (v: unknown, max = 512): v is string => safeBoundedText(v, max) && v.length > 0;
 /** IDs are opaque protocol capabilities and must not be whitespace-normalized. */
 const safeOpaqueId = (v: unknown, max = 256): v is string => safeText(v, max) && v === v.trim();
 const own = (v: Record<string, unknown>, allowed: readonly string[], required: readonly string[]) => Reflect.ownKeys(v).every((k) => typeof k === "string" && allowed.includes(k)) && required.every((k) => Object.hasOwn(v, k));
@@ -131,27 +132,75 @@ const exactMetadataTokens = (value: unknown): value is HerdrMetadataTokens => {
 const sessionRef = (p:Record<string,unknown>) => safeText(p.agent_session_id,128) && p.agent_session_path === undefined;
 /** The workspace projection is limited to the pane projection's existing safe summary grammar. */
 export const isCanonicalSummary = (value: unknown): value is string => parseSummary(value) !== undefined;
-/** Herdr 0.8.0's serialized PaneInfo status enum. */
+/** Herdr 0.9.0's serialized PaneInfo status enum. */
 const PANE_AGENT_STATUSES = new Set(["idle", "working", "blocked", "done", "unknown"]);
-/** Herdr PaneInfo.agent is optional and nullable; only a present value needs validation. */
-const isOptionalPaneAgent = (pane: Record<string, unknown>): boolean => !Object.hasOwn(pane, "agent") || pane.agent === null || safeText(pane.agent, 64);
+const PANE_INFO_REQUIRED_KEYS = ["pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision"] as const;
+const PANE_INFO_OPTIONAL_IGNORED_TEXT_KEYS = ["cwd", "foreground_cwd", "label", "title", "terminal_title", "terminal_title_stripped", "display_agent"] as const;
+const PANE_INFO_OPTIONAL_TEXT_KEYS = [...PANE_INFO_OPTIONAL_IGNORED_TEXT_KEYS, "agent"] as const;
+const PANE_INFO_OPTIONAL_KEYS = [...PANE_INFO_OPTIONAL_TEXT_KEYS, "state_labels", "tokens", "agent_session", "scroll"] as const;
+const PANE_INFO_KEYS = [...PANE_INFO_REQUIRED_KEYS, ...PANE_INFO_OPTIONAL_KEYS] as const;
+const PANE_TOKEN_KEY_RE = /^[A-Za-z0-9_-]{1,32}$/;
+const PANE_INFO_TEXT_MAX_BYTES = 512;
+const PANE_INFO_PATH_MAX_BYTES = 4096;
+const PANE_SESSION_ID_MAX_BYTES = 256;
+/** Local resource bound for schema-valid state_labels maps. */
+const PANE_STATE_LABEL_MAX_ENTRIES = 32;
+const PANE_TOKEN_MAX_ENTRIES = 32;
+/** Reject sparse, extended, accessor-backed, and custom-prototype arrays before reading elements. */
+const isCanonicalArray = (value: unknown): value is unknown[] => {
+ if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
+ const keys = Reflect.ownKeys(value);
+ if (keys.length !== value.length + 1) return false;
+ for (let index = 0; index < value.length; index += 1) {
+  const key = String(index);
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor)) return false;
+ }
+ const length = Object.getOwnPropertyDescriptor(value, "length");
+ return length !== undefined && "value" in length && keys.every(key => key === "length" || (typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < value.length));
+};
+/** Maps are untrusted JSON objects too: no inherited, symbolic, or accessor-backed entries. */
+const isPlainDataObject = (value: unknown): value is Record<string, unknown> => isPlainObject(value) && Reflect.ownKeys(value).every(key => {
+ const descriptor = Object.getOwnPropertyDescriptor(value, key);
+ return typeof key === "string" && descriptor !== undefined && "value" in descriptor;
+});
+const isOptionalPaneText = (pane: Record<string, unknown>, key: string, max = PANE_INFO_TEXT_MAX_BYTES, allowEmpty = true): boolean => !Object.hasOwn(pane, key) || pane[key] === null || (allowEmpty ? safeBoundedText(pane[key], max) : safeText(pane[key], max));
+const isPaneStringMap = (value: unknown, key: (value: string) => boolean, maxEntries: number): boolean => isPlainDataObject(value)
+ && Object.keys(value).length <= maxEntries
+ && Object.entries(value).every(([entryKey, entryValue]) => key(entryKey) && safeBoundedText(entryValue, PANE_INFO_TEXT_MAX_BYTES));
+/** Herdr's AgentSessionInfo has four required fields and an id/path reference kind. */
+const isExactPaneAgentSession = (value: unknown): boolean => isPlainDataObject(value)
+ && ownData(value, ["source", "agent", "kind", "value"], ["source", "agent", "kind", "value"])
+ && safeBoundedText(value.source, 128) && safeBoundedText(value.agent, 128)
+ && (value.kind === "id" ? safeBoundedText(value.value, PANE_SESSION_ID_MAX_BYTES) : value.kind === "path" && safeBoundedText(value.value, PANE_INFO_PATH_MAX_BYTES));
+/** Herdr's PaneScrollInfo contains only three nonnegative u64s, bounded here to JS-safe integers. */
+const isExactPaneScroll = (value: unknown): boolean => isPlainDataObject(value)
+ && ownData(value, ["offset_from_bottom", "max_offset_from_bottom", "viewport_rows"], ["offset_from_bottom", "max_offset_from_bottom", "viewport_rows"])
+ && [value.offset_from_bottom, value.max_offset_from_bottom, value.viewport_rows].every(integer => Number.isSafeInteger(integer) && (integer as number) >= 0);
 type WorkspacePaneInfo = {
  pane_id: string; terminal_id: string; workspace_id: string; tab_id: string;
  focused: boolean; agent_status: "idle" | "working" | "blocked" | "done" | "unknown";
  revision: number; agent?: string | null;
 };
-/** A scoped read is usable only when every bounded, schema-faithful PaneInfo names that workspace and a unique pane. */
+/** A scoped read is usable only when every bounded, schema-faithful 0.9.0 PaneInfo names that workspace and a unique pane. */
 export function isExactWorkspacePaneListResult(value: unknown, workspaceId: string): value is { type: "pane_list"; panes: WorkspacePaneInfo[] } {
- if (!safeOpaqueId(workspaceId) || !isPlainObject(value) || !ownData(value, ["type", "panes"], ["type", "panes"]) || value.type !== "pane_list" || !Array.isArray(value.panes) || value.panes.length > 128) return false;
+ if (!safeOpaqueId(workspaceId) || !isPlainObject(value) || !ownData(value, ["type", "panes"], ["type", "panes"]) || value.type !== "pane_list" || !isCanonicalArray(value.panes) || value.panes.length > 128) return false;
  const paneIds = new Set<string>();
  for (const pane of value.panes) {
-  if (!isPlainObject(pane)
-   || !ownData(pane, ["pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision", "agent"], ["pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision"])
+  if (!isPlainDataObject(pane)
+   || !ownData(pane, PANE_INFO_KEYS, PANE_INFO_REQUIRED_KEYS)
    || !safeOpaqueId(pane.workspace_id) || pane.workspace_id !== workspaceId
    || !safeOpaqueId(pane.pane_id) || !safeOpaqueId(pane.terminal_id) || !safeOpaqueId(pane.tab_id)
    || typeof pane.focused !== "boolean" || !PANE_AGENT_STATUSES.has(pane.agent_status as string)
    || !Number.isSafeInteger(pane.revision) || (pane.revision as number) < 0
-   || !isOptionalPaneAgent(pane) || paneIds.has(pane.pane_id)) return false;
+   || !PANE_INFO_OPTIONAL_IGNORED_TEXT_KEYS.every(key => isOptionalPaneText(pane, key, key === "cwd" || key === "foreground_cwd" ? PANE_INFO_PATH_MAX_BYTES : PANE_INFO_TEXT_MAX_BYTES))
+   // A schema-valid empty agent is admitted; sole-Pi selection treats it as non-Pi.
+   || !isOptionalPaneText(pane, "agent")
+   || (Object.hasOwn(pane, "state_labels") && !isPaneStringMap(pane.state_labels, key => safeBoundedText(key, 128), PANE_STATE_LABEL_MAX_ENTRIES))
+   || (Object.hasOwn(pane, "tokens") && !isPaneStringMap(pane.tokens, key => PANE_TOKEN_KEY_RE.test(key), PANE_TOKEN_MAX_ENTRIES))
+   || (Object.hasOwn(pane, "agent_session") && pane.agent_session !== null && !isExactPaneAgentSession(pane.agent_session))
+   || (Object.hasOwn(pane, "scroll") && pane.scroll !== null && !isExactPaneScroll(pane.scroll))
+   || paneIds.has(pane.pane_id)) return false;
   paneIds.add(pane.pane_id);
  }
  return true;
