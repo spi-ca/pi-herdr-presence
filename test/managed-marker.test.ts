@@ -59,7 +59,8 @@ test("the reviewed managed Herdr marker enables bounded companion presentation r
       },
     },
   };
-  const server = await fakeSocket(socketPath, (line) => {
+  const server = await fakeSocket(socketPath, (line, connection) => {
+    connection.expectPeerClosure();
     const request = JSON.parse(line) as Request;
     requests.push(request);
     return JSON.stringify({ id: request.id, result: {} });
