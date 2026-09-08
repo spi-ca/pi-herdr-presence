@@ -33,6 +33,10 @@ All values are read from the environment. Booleans are case-insensitive after su
 
 `PI_HERDR_PRESENCE_METADATA=false` does not remove mode ownership or cleanup. It prevents ordinary `pane.report_metadata` projection and prevents all `workspace.report_metadata` `main_summary` attempts; the active client's startup clear still removes its owned current projection, and standalone additionally clears its owned legacy projection. Session/state reports remain standalone-only.
 
+## Herdr compatibility baseline
+
+The current compatibility target is Herdr application `v0.9.0` with protocol `22`. This is distinct from `HERDR_INTEGRATION_VERSION=8` in Herdr's managed `herdr-agent-state.ts` asset: `8` identifies that managed integration asset and does not identify the Herdr application or socket protocol version.
+
 ## Managed marker and mode selection
 
 The extension non-executingly inspects `extensions/herdr-agent-state.ts` under Pi's agent directory. It accepts a managed file only when it is a stable regular file no larger than 64 KiB and contains the exact marker `HERDR_INTEGRATION_ID=pi`; the bounded probe has a 250 ms deadline. Symlinks, unsafe/non-regular/oversized/mutating files, read errors, malformed configuration, and timeouts are `unknown` and fail closed.
@@ -55,9 +59,9 @@ The extension non-executingly inspects `extensions/herdr-agent-state.ts` under P
 
 ## Workspace `main_summary`
 
-When metadata is enabled, the extension can lease one workspace token, `main_summary`, under `herdr:pi-presence`. It uses the existing bounded pane `summary` grammar only. Before each initial or heartbeat write it performs a read-only, workspace-scoped `pane.list`, accepts a bounded schema-faithful result, and writes only when exactly one reported/detected `agent: "pi"` pane exists and it is this opaque pane ID. `PaneInfo.agent` may be absent or `null`; neither counts as Pi.
+When metadata is enabled, the extension can lease one workspace token, `main_summary`, under `herdr:pi-presence`. It uses the existing bounded pane `summary` grammar only. Before each initial or heartbeat write it performs a read-only, workspace-scoped `pane.list` and validates the Herdr `v0.9.0` `PaneInfo` snapshot within local bounds. The validator admits only its exact recognized-field allowlist: required `pane_id`, `terminal_id`, `workspace_id`, `tab_id`, `focused`, `agent_status`, and `revision`; and optional `cwd`, `foreground_cwd`, `label`, `agent`, `title`, `terminal_title`, `terminal_title_stripped`, `display_agent`, `state_labels`, `tokens`, `agent_session`, and `scroll`. It rejects every unknown field rather than accepting arbitrary schema-valid additional properties, and bounds the list, strings, maps, and nested values before inspecting them. Schema-valid omissions and nullable fields—including an absent or `null` `agent`—are admitted. A malformed or oversized snapshot fails closed: no workspace lease write is sent. After validation, sole-Pi eligibility uses only the candidate rows' `pane_id` and `agent`: exactly one `agent: "pi"` row must exist and its `pane_id` must be this opaque pane ID. An absent or `null` `agent` is not Pi. Other admitted fields do not affect eligibility.
 
-The write has `ttl_ms: 30000`. The next attempt is scheduled 10 seconds after the previous attempt completes; the list and write each get one five-second, no-retry budget. A pane metadata update only changes the value used by a later heartbeat—it does not synchronously update workspace metadata. Eligibility is a separate read and write, so it is non-atomic and not authority proof. Errors, malformed lists, zero/multiple/foreign Pi panes, replacement, and teardown never clear workspace metadata; the lease expires.
+The outgoing lease contract is unchanged: the write contains only `workspace_id`, `source: "herdr:pi-presence"`, `seq`, `ttl_ms: 30000`, and `tokens: { main_summary }`. The next attempt is scheduled 10 seconds after the previous attempt completes; the list and write each get one five-second, no-retry budget. A pane metadata update only changes the value used by a later heartbeat—it does not synchronously update workspace metadata. Eligibility is a separate read and write, so it is non-atomic and not authority proof. Errors, malformed or oversized lists, zero/multiple/foreign Pi panes, replacement, and teardown never clear workspace metadata; the lease expires.
 
 To render the leased workspace summary and pane summary in Herdr's sidebar, configure Herdr (not this extension):
 
@@ -70,6 +74,28 @@ pi = [["state_icon", "workspace", "tab"], ["agent", "$summary"]]
 ```
 
 When the workspace row already shows `$main_summary`, leaving only `["agent"]` for Pi avoids duplicate text.
+
+### Conditional sidebar styling for Herdr `>=0.9.0`
+
+The following local Herdr preset keeps the built-in `machine` token and styles only tokens already in this extension's fixed ten-token pane contract. It uses `$summary` text rules in ordered `equals`, `contains`, and `starts_with` order, plus descending numeric `gt` rules for the existing `$context` token:
+
+```toml
+[ui.sidebar.agents.rows_by_agent]
+pi = [
+  ["state_icon", "machine", "workspace", "tab"],
+  [{ token = "$summary", fg = "#89b4fa", rules = [
+    { equals = "input", fg = "#f9e2af", bold = true },
+    { contains = "terminal failed", fg = "#f38ba8", bold = true },
+    { starts_with = "working", fg = "#a6e3a1" },
+  ] }],
+  [{ token = "$context", fg = "#89b4fa", rules = [
+    { gt = 90, fg = "#f38ba8", bold = true },
+    { gt = 75, fg = "#f9e2af" },
+  ] }],
+]
+```
+
+Herdr applies the first matching rule only; matching uses the complete token value before display truncation. Each styled token occurrence can have at most `16` ordered rules. The `gt` comparisons are strict numeric comparisons, so descending thresholds preserve the higher-severity match. `state_icon` and composite `git_status` support fixed styling but cannot have `rules`. This preset introduces no custom token: `machine` is a built-in navigation token, while `$summary` and `$context` are existing emitted pane tokens that it styles conditionally. To style terminal-batch loss instead, replace `$context` in the final row with the existing `$v2_terminal_overflow` token and retain descending numeric `gt` rules.
 
 ## Notifications
 

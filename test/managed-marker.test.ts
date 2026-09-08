@@ -68,8 +68,9 @@ test("the reviewed managed Herdr marker enables bounded companion presentation r
 
   try {
     await fs.mkdir(join(agentDirectory, "extensions"), { recursive: true });
-    // Committed review fixture copied from upstream Herdr v8. Real sibling-Herdr
-    // compatibility remains the explicit manual smoke check.
+    // The official Herdr v0.9.0 asset is byte-identical to v0.8.2; its managed
+    // integration marker remains asset version 8. Real sibling-Herdr compatibility
+    // remains the explicit manual smoke check.
     const assetUrl = new URL("./fixtures/herdr-agent-state-v8.ts", import.meta.url);
     const installedAsset = join(agentDirectory, "extensions", "herdr-agent-state.ts");
     await fs.copyFile(assetUrl, installedAsset);

@@ -23,7 +23,7 @@ function runWith(result: unknown) {
 
 const sole = { type: "pane_list", panes: [paneInfo({ pane_id: "this-pane" })] };
 
-test("workspace summary publishes only for this pane as the sole Pi authority and carries its bounded lease", async () => {
+test("a full v0.9 PaneInfo fixture publishes only for this pane as the sole Pi authority and carries its bounded lease", async () => {
   const { client, requests } = runWith(sole);
   await client.workspaceMainSummary("working · 1/2");
   expect(requests.map(request => request.method)).toEqual(["pane.list", "workspace.report_metadata"]);
@@ -42,6 +42,7 @@ test("workspace summary ignores nullable, absent, and non-Pi PaneInfo agents whi
       paneInfo({ pane_id: "shell", agent: "shell" }),
       (() => { const { agent: _agent, ...unmanaged } = paneInfo({ pane_id: "unmanaged" }); return unmanaged; })(),
       paneInfo({ pane_id: "unknown", agent: null }),
+      paneInfo({ pane_id: "empty", agent: "" }),
     ],
   });
   await client.workspaceMainSummary("idle");
@@ -54,7 +55,8 @@ test("workspace summary fails closed for multi, missing, foreign, and malformed 
     { type: "pane_list", panes: [] },
     { type: "pane_list", panes: [paneInfo({ pane_id: "other" })] },
     { type: "pane_list", panes: [{ ...paneInfo({ pane_id: "this-pane" }), agent: 1 }] },
-    { type: "pane_list", panes: [{ ...paneInfo({ pane_id: "this-pane" }), agent: "" }] },
+    { type: "pane_list", panes: [paneInfo({ pane_id: "this-pane", agent: "" })] },
+    { type: "pane_list", panes: [paneInfo({ pane_id: "this-pane", agent_session: { source: "pi", agent: "pi", kind: "id", value: 1 } as never })] },
     { type: "wrong", panes: sole.panes },
   ];
   for (const result of cases) {

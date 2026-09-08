@@ -109,21 +109,61 @@ test("accepts only canonical compact grammars for populated metadata tokens", ()
  ]) expect(isExactMetadataIngressParams({ ...populated, title: `Pi · ${tokens.summary}`, tokens })).toBe(false);
 });
 
+test("accepts schema-valid empty PaneInfo optional fields while preserving eligibility safety", () => {
+ const emptyOptional = paneInfo({
+  cwd: "", foreground_cwd: "", label: "", title: "", terminal_title: "", terminal_title_stripped: "", display_agent: "",
+  state_labels: { empty: "" }, tokens: { empty: "" },
+  agent_session: { source: "", agent: "", kind: "id", value: "" },
+ });
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [emptyOptional] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ agent: "", state_labels: { "": "" }, tokens: {} })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ state_labels: {}, tokens: {} })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ title: "\u0000" })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ state_labels: { "\u0000": "" } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ state_labels: { "\u202e": "" } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ state_labels: { ["x".repeat(129)]: "" } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ tokens: { empty: "\u202e" } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ agent_session: { source: "", agent: "", kind: "path", value: "\u0000" } })] }, "workspace")).toBe(false);
+});
+
 test("strictly encodes scoped workspace summary requests and bounded pane-list results", () => {
  const list = { type: "pane_list", panes: [paneInfo()] };
  expect(encodeHerdrRequest({ id: "list", method: "pane.list", params: { workspace_id: "workspace" } })).toContain('"workspace_id":"workspace"');
  expect(() => encodeHerdrRequest({ id: "list", method: "pane.list", params: {} })).toThrow();
  expect(isExactWorkspacePaneListResult(list, "workspace")).toBe(true);
- // Herdr PaneInfo.agent is optional and nullable; only safe strings can name an agent.
- expect(isExactWorkspacePaneListResult({ ...list, panes: [...list.panes, paneInfo({ pane_id: "shell", agent: "shell" }), (() => { const { agent: _agent, ...none } = paneInfo({ pane_id: "none" }); return none; })(), paneInfo({ pane_id: "null", agent: null })] }, "workspace")).toBe(true);
+ const { cwd: _cwd, foreground_cwd: _foregroundCwd, label: _label, agent: _agent, title: _title, terminal_title: _terminalTitle, terminal_title_stripped: _terminalTitleStripped, display_agent: _displayAgent, state_labels: _stateLabels, tokens: _tokens, agent_session: _agentSession, scroll: _scroll, ...minimalPane } = paneInfo();
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [minimalPane] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ cwd: null, foreground_cwd: null, label: null, agent: null, title: null, terminal_title: null, terminal_title_stripped: null, display_agent: null, agent_session: null, scroll: null })] }, "workspace")).toBe(true);
+ // Herdr PaneInfo.agent is optional and nullable; bounded strings, including empty strings, are schema-valid.
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [...list.panes, paneInfo({ pane_id: "shell", agent: "shell" }), (() => { const { agent: _agent, ...none } = paneInfo({ pane_id: "none" }); return none; })(), paneInfo({ pane_id: "null", agent: null }), paneInfo({ pane_id: "empty", agent: "" })] }, "workspace")).toBe(true);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ workspace_id: "other" })] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent: 1 }] }, "workspace")).toBe(false);
- expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent: "" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent: "" }] }, "workspace")).toBe(true);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_status: "done" })] }, "workspace")).toBe(true);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), focused: "yes" }] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent_status: "other" }] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), revision: -1 }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), revision: Number.MAX_SAFE_INTEGER + 1 }] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), terminal_id: "" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ label: "x".repeat(513) })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ cwd: "x".repeat(4096) })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ cwd: "x".repeat(4097) })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: { source: "pi", agent: "pi", kind: "id", value: "x".repeat(256) } })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: { source: "pi", agent: "pi", kind: "path", value: "x".repeat(4096) } })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: { source: "pi", agent: "pi", kind: "id", value: "x".repeat(257) } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: { source: "pi", agent: "pi", kind: "path", value: "x".repeat(4097) } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: { source: "pi", agent: "pi", kind: "other" as never, value: "session" } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: { source: "pi", agent: "pi", kind: "id", value: "session", extra: true } as never })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ scroll: { offset_from_bottom: 5, max_offset_from_bottom: 1, viewport_rows: 0 } })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ scroll: { offset_from_bottom: -1, max_offset_from_bottom: 0, viewport_rows: 1 } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ scroll: { offset_from_bottom: 0, max_offset_from_bottom: Number.MAX_SAFE_INTEGER + 1, viewport_rows: 1 } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ scroll: { offset_from_bottom: 0, max_offset_from_bottom: 0 } as never })] }, "workspace")).toBe(false);
+ const stateLabels32 = Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`state${index}`, "Idle"]));
+ const tokens32 = Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`key${index}`, "idle"]));
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ state_labels: stateLabels32, tokens: tokens32 })] }, "workspace")).toBe(true);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ tokens: { "invalid.key": "idle" } })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ tokens: Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`key${index}`, "idle"])) })] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ state_labels: Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`state${index}`, "Idle"])) })] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), extra: null }] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), [Symbol("extra")]: null }] }, "workspace")).toBe(false);
  let accessorReads = 0;
@@ -131,7 +171,32 @@ test("strictly encodes scoped workspace summary requests and bounded pane-list r
  Object.defineProperty(accessorPane, "agent", { enumerable: true, get() { accessorReads += 1; return "pi"; } });
  expect(isExactWorkspacePaneListResult({ ...list, panes: [accessorPane] }, "workspace")).toBe(false);
  expect(accessorReads).toBe(0);
+ const accessorTokens = { summary: "idle" };
+ Object.defineProperty(accessorTokens, "summary", { enumerable: true, get() { accessorReads += 1; return "idle"; } });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ tokens: accessorTokens })] }, "workspace")).toBe(false);
+ expect(accessorReads).toBe(0);
+ const prototypePane = paneInfo();
+ Object.setPrototypeOf(prototypePane, { inherited: true });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [prototypePane] }, "workspace")).toBe(false);
+ const prototypeSession = { source: "pi", agent: "pi", kind: "id" as const, value: "session" };
+ Object.setPrototypeOf(prototypeSession, { inherited: true });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: prototypeSession })] }, "workspace")).toBe(false);
+ const accessorSession = { source: "pi", agent: "pi", kind: "id" as const, value: "session" };
+ Object.defineProperty(accessorSession, "value", { enumerable: true, get() { accessorReads += 1; return "session"; } });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: accessorSession })] }, "workspace")).toBe(false);
+ expect(accessorReads).toBe(0);
+ const symbolSession = { source: "pi", agent: "pi", kind: "id" as const, value: "session" };
+ Object.defineProperty(symbolSession, Symbol("extra"), { enumerable: true, value: true });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [paneInfo({ agent_session: symbolSession })] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: Array.from({ length: 129 }, (_, index) => paneInfo({ pane_id: String(index), agent: "other" })) }, "workspace")).toBe(false);
+ const sparse = new Array(1);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: sparse }, "workspace")).toBe(false);
+ const extended = [paneInfo()];
+ Object.assign(extended, { extra: true });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: extended }, "workspace")).toBe(false);
+ const customPrototype = [paneInfo()];
+ Object.setPrototypeOf(customPrototype, {});
+ expect(isExactWorkspacePaneListResult({ ...list, panes: customPrototype }, "workspace")).toBe(false);
  expect(WORKSPACE_MAIN_SUMMARY_TTL_MS).toBe(30_000);
  expect(WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS).toBe(10_000);
  expect(WORKSPACE_MAIN_SUMMARY_REQUEST_TIMEOUT_MS).toBe(5_000);

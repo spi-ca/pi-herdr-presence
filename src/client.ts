@@ -122,7 +122,7 @@ export class PresenceClient {
 		};
 		await this.ordinary("agent", "pane.report_agent", params, "agent", deadlineAt);
 	}
-	/** Herdr v8 renders fixed display fields, a summary-derived title, and the complete V2 token patch. */
+	/** Herdr app v0.9.0 (protocol 22) renders fixed display fields, a summary-derived title, and the complete V2 token patch; v8 names the managed integration asset. */
 	async metadata(
 		presentation: HerdrPresentation,
 		tokens: HerdrMetadataTokens,

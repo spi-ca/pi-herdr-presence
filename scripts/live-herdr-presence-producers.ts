@@ -20,6 +20,10 @@ import {
 	isExactLegacyMetadataClearParams,
 	isExactMetadataClearParams,
 	isExactMetadataIngressParams,
+	isExactWorkspaceMainSummaryParams,
+	isExactWorkspacePaneListResult,
+	isExactWorkspaceReportMetadataResult,
+	decodeHerdrResponse,
 } from "../src/protocol.js";
 import { PresenceRuntime } from "../src/runtime.js";
 
@@ -94,6 +98,7 @@ type CapturedRequest = {
 	id: string;
 	method: string;
 	params: Record<string, unknown>;
+	response?: string;
 };
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
 	Object.keys(value).length === keys.length &&
@@ -329,7 +334,9 @@ async function createProxy(realPath: string): Promise<Proxy> {
 			notify(request, false);
 			void relay(line, downstream)
 				.then((response) => {
+					decodeHerdrResponse(response, request.id);
 					if (downstream.destroyed) return;
+					request.response = response;
 					acknowledged.push(request);
 					notify(request, true);
 					downstream.end(`${response}\n`);
@@ -444,6 +451,41 @@ try {
 		"startup current clear, legacy clear, session, agent, and ordinary metadata must be distinct and ordered",
 	);
 
+	const workspacePaneList = await proxy.waitFor(
+		(request) =>
+			request.method === "pane.list" &&
+			Object.keys(request.params).length === 1 &&
+			request.params.workspace_id === identity.workspaceId,
+		true,
+	);
+	assert.ok(workspacePaneList.response, "pane.list must return an acknowledged response");
+	const listed = decodeHerdrResponse(workspacePaneList.response, workspacePaneList.id);
+	assert.ok(
+		isExactWorkspacePaneListResult(listed, identity.workspaceId),
+		"Herdr must return a complete v0.9.0/protocol 22 PaneInfo list for this workspace",
+	);
+	const piPanes = listed.panes.filter((pane) => pane.agent === "pi");
+	assert.deepEqual(
+		piPanes.map((pane) => pane.pane_id),
+		[identity.paneId],
+		"the workspace lease requires this pane to be the sole Pi pane",
+	);
+	const workspaceLease = await proxy.waitFor(
+		(request) =>
+			request.method === "workspace.report_metadata" &&
+			isExactWorkspaceMainSummaryParams(request.params) &&
+			(request.params.tokens as Record<string, unknown>).main_summary === "idle",
+		true,
+	);
+	assert.ok(workspaceLease.response, "workspace lease must return an acknowledged response");
+	assert.equal(
+		isExactWorkspaceReportMetadataResult(
+			decodeHerdrResponse(workspaceLease.response, workspaceLease.id),
+		),
+		true,
+		"workspace main-summary lease requires Herdr's exact acknowledgement",
+	);
+
 	askUser.startSession(context as never);
 	const request = askUser.beginRequest(context as never);
 	assert.equal(subagent.startSession(sessionId, 1), true);
@@ -521,14 +563,16 @@ try {
 	assert.equal(tokens.v2_interaction, "ask_user:1");
 	assert.equal(tokens.v2_subagents, "0,0,0,1,0,0,0");
 
+	const withdrawalAcknowledgedCursor = proxy.acknowledged.length;
 	askUser.finishRequest(request);
 	subagent.stop();
 	const withdrawnMetadata = await proxy.waitFor(
 		(output) =>
+			proxy.acknowledged.indexOf(output) >= withdrawalAcknowledgedCursor &&
 			output.method === "pane.report_metadata" &&
-			(output.params.tokens as Record<string, unknown>)?.v2_interaction ===
-				null &&
-			(output.params.tokens as Record<string, unknown>)?.v2_subagents === null,
+			isExactMetadataIngressParams(output.params) &&
+			(output.params.tokens as Record<string, unknown>).v2_interaction === null &&
+			(output.params.tokens as Record<string, unknown>).v2_subagents === null,
 		true,
 	);
 	assert.equal(
@@ -544,9 +588,17 @@ try {
 	await runtime.shutdownSession(
 		(runtime as unknown as { context: object }).context,
 	);
-	const teardownCurrentClear = await proxy.waitFor(
+	const teardownAuthorityClear = await proxy.waitFor(
 		(output) =>
 			proxy.captured.indexOf(output) >= beforeTeardown &&
+			output.method === "pane.clear_agent_authority" &&
+			isExactAgentAuthorityClear(output.params),
+		true,
+	);
+	const teardownCurrentClear = await proxy.waitFor(
+		(output) =>
+			proxy.captured.indexOf(output) >
+				proxy.captured.indexOf(teardownAuthorityClear) &&
 			output.method === "pane.report_metadata" &&
 			isExactMetadataClearParams(output.params),
 		true,
@@ -559,21 +611,26 @@ try {
 			isExactLegacyMetadataClearParams(output.params),
 		true,
 	);
-	const teardownAuthorityClear = await proxy.waitFor(
-		(output) =>
-			proxy.captured.indexOf(output) >
-				proxy.captured.indexOf(teardownLegacyClear) &&
-			output.method === "pane.clear_agent_authority" &&
-			isExactAgentAuthorityClear(output.params),
-		true,
-	);
 	assert.ok(
-		proxy.captured.indexOf(teardownCurrentClear) <
-			proxy.captured.indexOf(teardownLegacyClear) &&
-			proxy.captured.indexOf(teardownLegacyClear) <
-				proxy.captured.indexOf(teardownAuthorityClear),
-		"teardown must independently order current clear, legacy clear, then authority clear",
+		proxy.captured.indexOf(teardownAuthorityClear) <
+			proxy.captured.indexOf(teardownCurrentClear) &&
+			proxy.captured.indexOf(teardownCurrentClear) <
+				proxy.captured.indexOf(teardownLegacyClear),
+		"teardown must independently order authority clear, current clear, then legacy clear",
 	);
+	for (const output of proxy.captured.filter(
+		(request) => request.method === "workspace.report_metadata",
+	)) {
+		assert.ok(
+			isExactWorkspaceMainSummaryParams(output.params),
+			"workspace output must remain a leased main-summary report",
+		);
+		assert.equal(
+			Object.hasOwn(output.params, "clear_tokens"),
+			false,
+			"workspace teardown relies on lease TTL expiry and must not clear workspace metadata",
+		);
+	}
 	for (const output of proxy.captured.filter(
 		(request) => request.method === "pane.report_metadata",
 	)) {

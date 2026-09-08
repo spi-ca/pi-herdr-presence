@@ -7,7 +7,7 @@ const companionEnvelopeKeys = ["pane_id", "source", "applies_to_source", "seq", 
 const companionClearEnvelopeKeys = ["pane_id", "source", "applies_to_source", "seq", "clear_title", "clear_display_agent", "clear_state_labels", "tokens"];
 const legacyClearEnvelopeKeys = ["pane_id", "source", "applies_to_source", "agent", "seq", "tokens"];
 
-/** Reusable assertion for the reviewed upstream Herdr v8 metadata variants. */
+/** Reusable assertion for Herdr app v0.9.0 (protocol 22) metadata variants; v8 names the managed integration asset. */
 export function expectExactMetadataIngress(params: unknown): void {
   expect(isExactMetadataIngressParams(params)).toBe(true);
   expect(Object.keys(params as object)).toEqual(envelopeKeys);
