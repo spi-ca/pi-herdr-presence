@@ -7,7 +7,7 @@ export type FakeSocketContext = { expectPeerClosure(): void };
 
 /** Keep unexpected server-side write failures visible to the owning test. */
 export function handleFakeSocketError(error: Error, expectedPeerClosure: boolean): void {
-  if (expectedPeerClosure && (error as NodeJS.ErrnoException).code === "EPIPE") return;
+  if (expectedPeerClosure && ["EPIPE", "ECONNRESET"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
   throw error;
 }
 

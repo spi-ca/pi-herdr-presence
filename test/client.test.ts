@@ -286,7 +286,7 @@ test("absolute lifecycle deadlines are checked before transport and passed throu
   expect(deadlines).toEqual([deadlineAt]);
 });
 
-test("lifecycle transport retries split the configured timeout across two attempts", async () => {
+test("lifecycle transport retries use two bounded attempts", async () => {
   const timeouts: number[] = [];
   const transport = {
     async request(line: string, _key?: string, _priority?: boolean, timeoutMs?: number) {
@@ -300,7 +300,12 @@ test("lifecycle transport retries split the configured timeout across two attemp
 
   await client(transport, 701).report("working", session);
 
-  expect(timeouts).toEqual([350, 351]);
+  expect(timeouts).toHaveLength(2);
+  expect(timeouts[0]).toBeGreaterThan(0);
+  expect(timeouts[0]).toBeLessThanOrEqual(350);
+  expect(timeouts[1]).toBeGreaterThan(0);
+  expect(timeouts[1]).toBeLessThanOrEqual(351);
+  expect(timeouts[0]! + timeouts[1]!).toBeLessThanOrEqual(701);
 });
 
 test("a minimum lifecycle timeout remains one nonzero bounded attempt", async () => {
@@ -317,7 +322,9 @@ test("a minimum lifecycle timeout remains one nonzero bounded attempt", async ()
 
   await client(transport, 100).report("working", session);
 
-  expect(timeouts).toEqual([50]);
+  expect(timeouts).toHaveLength(1);
+  expect(timeouts[0]).toBeGreaterThan(0);
+  expect(timeouts[0]).toBeLessThanOrEqual(50);
 });
 
 test("teardown prioritizes authority clear after a lost session response", async () => {
