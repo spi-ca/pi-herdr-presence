@@ -44,16 +44,28 @@ jobs:
       - name: Install selected Pi compatibility graph
         if: matrix.pi-version != ''
         env:
-          PI_VERSION: ${{ matrix.pi-version }}
+          PI_GRAPH_EXPECTED: ${{ matrix.pi-graph }}
         run: |
           set -euo pipefail
           cp package.json "$RUNNER_TEMP/package.json.original"
           bun -e '
             import { readFileSync, writeFileSync } from "node:fs";
             const pkg = JSON.parse(readFileSync("package.json", "utf8"));
-            const names = Object.keys(pkg.devDependencies ?? {}).filter((name) => name.startsWith("@earendil-works/pi-"));
-            if (names.length === 0) throw new Error("no declared Pi development packages");
-            for (const name of names) pkg.devDependencies[name] = process.env.PI_VERSION;
+            if (typeof pkg !== "object" || pkg === null || Array.isArray(pkg)) throw new Error("invalid package manifest");
+            const devDependencies = pkg.devDependencies ?? {};
+            if (typeof devDependencies !== "object" || devDependencies === null || Array.isArray(devDependencies)) throw new Error("invalid development dependencies");
+            const expected = JSON.parse(process.env.PI_GRAPH_EXPECTED ?? "");
+            if (typeof expected !== "object" || expected === null || Array.isArray(expected)) throw new Error("PI_GRAPH_EXPECTED must be a package/version map");
+            const entries = Object.entries(expected);
+            if (entries.length === 0) throw new Error("PI_GRAPH_EXPECTED must not be empty");
+            const piName = /^@earendil-works\/pi-[a-z0-9][a-z0-9._-]*$/;
+            const exactVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+            for (const [name, version] of entries) {
+              if (!piName.test(name) || typeof version !== "string" || !exactVersion.test(version)) throw new Error(`invalid Pi graph entry: ${name}@${String(version)}`);
+            }
+            for (const name of Object.keys(devDependencies)) if (name.startsWith("@earendil-works/pi-")) delete devDependencies[name];
+            for (const [name, version] of entries) devDependencies[name] = version;
+            pkg.devDependencies = devDependencies;
             writeFileSync("package.json", `${JSON.stringify(pkg, null, 2)}\n`);
           '
           rm -rf node_modules
