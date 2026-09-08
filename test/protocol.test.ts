@@ -124,6 +124,13 @@ test("strictly encodes scoped workspace summary requests and bounded pane-list r
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), agent_status: "other" }] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), revision: -1 }] }, "workspace")).toBe(false);
  expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), terminal_id: "" }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), extra: null }] }, "workspace")).toBe(false);
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [{ ...paneInfo(), [Symbol("extra")]: null }] }, "workspace")).toBe(false);
+ let accessorReads = 0;
+ const accessorPane = paneInfo();
+ Object.defineProperty(accessorPane, "agent", { enumerable: true, get() { accessorReads += 1; return "pi"; } });
+ expect(isExactWorkspacePaneListResult({ ...list, panes: [accessorPane] }, "workspace")).toBe(false);
+ expect(accessorReads).toBe(0);
  expect(isExactWorkspacePaneListResult({ ...list, panes: Array.from({ length: 129 }, (_, index) => paneInfo({ pane_id: String(index), agent: "other" })) }, "workspace")).toBe(false);
  expect(WORKSPACE_MAIN_SUMMARY_TTL_MS).toBe(30_000);
  expect(WORKSPACE_MAIN_SUMMARY_HEARTBEAT_MS).toBe(10_000);

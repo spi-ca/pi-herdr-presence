@@ -5,7 +5,7 @@
     "": {
       "name": "pi-herdr-presence",
       "dependencies": {
-        "@pi/presence": "github:spi-ca/pi-presence#v2-20260828-1",
+        "@pi/presence": "github:spi-ca/pi-presence#v2-20260907-1",
       },
       "devDependencies": {
         "@biomejs/biome": "2.3.14",
@@ -128,7 +128,7 @@
 
     "@mariozechner/clipboard-win32-x64-msvc": ["@mariozechner/clipboard-win32-x64-msvc@0.3.9", "", { "os": "win32", "cpu": "x64" }, "sha512-ihQC3EufqEY81vhXBgVBtK4prL+wc62zJsSvxrgz7K1hsdt6OObz6v9p3Rn1OG3GJksTTKMJF0u/guMISHPhSA=="],
 
-    "@pi/presence": ["@pi/presence@github:spi-ca/pi-presence#44a22cf", {}, "spi-ca-pi-presence-44a22cf", "sha512-8jnkJ1/P92FerKIDswFP/46B7/R/z8G5bTstKyp0cshTfLYsTISeydQv3xlgsJnbTQr3fXcDpYD134TbKvYLog=="],
+    "@pi/presence": ["@pi/presence@github:spi-ca/pi-presence#ae5e27f", {}, "spi-ca-pi-presence-ae5e27f", "sha512-a9MqtHxtrjx9d7P66XDGuS2DKqsxXlj+jDnvIAI0qlnHXw86MDojKtZqYWYucCYhGdAmaXmkDJLXzuqmb9qkAA=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

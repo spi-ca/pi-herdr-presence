@@ -5,9 +5,9 @@
 ## Install
 
 ```bash
-pi install git:github.com/spi-ca/pi-herdr-presence
+pi install git:github.com/spi-ca/pi-herdr-presence@v20260907-2
 # project-local
-pi install -l git:github.com/spi-ca/pi-herdr-presence
+pi install -l git:github.com/spi-ca/pi-herdr-presence@v20260907-2
 ```
 
 Use an absolute checkout path for local development and run `/reload` after changing it.
