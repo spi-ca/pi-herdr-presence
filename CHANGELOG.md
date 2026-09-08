@@ -1,6 +1,6 @@
 # 변경 이력
 
-## Unreleased
+## v20260908-1
 
 - Compatibility validation now admits only the exact recognized Herdr `v0.9.0` protocol-`22` `PaneInfo` fields within local bounds, rejects unknown fields, uses only `agent: "pi"` and `pane_id` for sole-Pi selection, and fails the workspace lease closed for malformed or oversized snapshots. The outgoing `main_summary` lease envelope remains unchanged.
 - Documentation now distinguishes the Herdr application/protocol target (`v0.9.0`/`22`) from managed integration asset version `8`, and includes a conditional sidebar styling preset that conditionally styles existing emitted tokens while displaying built-in navigation tokens, without introducing a custom token.
