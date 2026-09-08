@@ -2,7 +2,7 @@
 
 This is the authoritative Herdr wire-projection contract. [Architecture](architecture.md) describes ordering; [configuration](configuration.md) defines activation and lease eligibility; [feature ownership](feature-ownership.md) defines the authority boundary.
 
-The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/docs/lifecycle.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260828-1/fixtures/normative.json).
+The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/docs/lifecycle.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20260907-1/fixtures/normative.json).
 
 ## Pane projection
 

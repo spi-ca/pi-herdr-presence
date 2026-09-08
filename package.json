@@ -32,6 +32,6 @@
   },
   "type": "module",
   "dependencies": {
-    "@pi/presence": "github:spi-ca/pi-presence#v2-20260828-1"
+    "@pi/presence": "github:spi-ca/pi-presence#v2-20260907-1"
   }
 }

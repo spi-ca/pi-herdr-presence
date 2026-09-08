@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260907-2
+
+- Bounded Todo/protocol validation and projection stability are reinforced; CI now verifies locked/current Pi graphs and runs a provider-free package smoke.
+
 - Actionable notifications now have a finite queue-residency budget derived from timeout and queue capacity (clamped to 1–30 seconds), kept through fingerprint/connect/final pre-write validation alongside a fresh socket attempt begun at dequeue; only a successful `socket.write()` commits the reservation. Queue disposition is exactly once after admission; pre-write release rolls back transactional notification dedupe/rate reservations, while post-write delivery failures never do. Input lifecycles retain their exact pending key so short prompts cancel only their own pre-write toast; paired failure fallback is bounded, same-session fenced, and runs only after that release.
 
 - Long-running notifications are explicitly local-only: `background` and `all` no longer allow an external source to trigger them, while external success/info eligibility is unchanged.
