@@ -29,7 +29,7 @@ test("treats every reviewed managed Pi marker as an authority",async()=>{
   try{
     const managed=join(root,"extensions","herdr-agent-state.ts");
     await fs.mkdir(join(root,"extensions"));
-    await fs.writeFile(managed,"// HERDR_INTEGRATION_ID=pi\n// HERDR_INTEGRATION_VERSION=8\n");
+    await fs.writeFile(managed,"// HERDR_INTEGRATION_ID=pi\n// HERDR_INTEGRATION_VERSION=9\n");
     expect(await officialHookStatus({PI_CODING_AGENT_DIR:root})).toBe("present");
     expect(await officialHookDetected({PI_CODING_AGENT_DIR:root})).toBe(true);
   }finally{await fs.rm(root,{recursive:true,force:true});}

@@ -219,7 +219,7 @@ export function isExactWorkspaceMainSummaryParams(value: unknown): value is Reco
 }
 /** workspace.report_metadata has no useful partial success result. */
 export const isExactWorkspaceReportMetadataResult = (value: unknown): value is { type: "ok" } => isPlainObject(value) && own(value, ["type"], ["type"]) && value.type === "ok";
-/** Validates Herdr v8's safe presentation and complete V2 token patch. */
+/** Validates Herdr v9's safe presentation and complete V2 token patch. */
 /** Companion owns the same fixed presentation projection without managed agent authority. */
 export function isExactCompanionMetadataParams(value: unknown): value is Record<string, unknown> & { tokens: HerdrMetadataTokens } {
  const p = value as Record<string, unknown>;
@@ -264,7 +264,7 @@ export function isExactMetadataIngressParams(value: unknown): value is Record<st
   && exactMetadataTokens(p.tokens)
   && p.title === titleForSummary(p.tokens.summary);
 }
-/** Teardown uses Herdr's explicit v8 presentation-clear flags with the same token patch. */
+/** Teardown uses Herdr's explicit v9 presentation-clear flags with the same token patch. */
 export function isExactMetadataClearParams(value: unknown): value is Record<string, unknown> & { tokens: HerdrMetadataTokens } {
  const p = value as Record<string, unknown>;
  return isPlainObject(value)

@@ -1,5 +1,9 @@
 # 변경 이력
 
+## v20260917-1
+
+- Compatibility baseline is Herdr `v0.9.1` / protocol `22` and its managed Pi integration asset version `9`. The managed-marker and socket envelopes are unchanged; the reviewed v9 fixture adds Windows absolute session-path handling.
+
 ## v20260908-1
 
 - Compatibility validation now admits only the exact recognized Herdr `v0.9.0` protocol-`22` `PaneInfo` fields within local bounds, rejects unknown fields, uses only `agent: "pi"` and `pane_id` for sole-Pi selection, and fails the workspace lease closed for malformed or oversized snapshots. The outgoing `main_summary` lease envelope remains unchanged.
