@@ -462,7 +462,7 @@ try {
 	const listed = decodeHerdrResponse(workspacePaneList.response, workspacePaneList.id);
 	assert.ok(
 		isExactWorkspacePaneListResult(listed, identity.workspaceId),
-		"Herdr must return a complete v0.9.0/protocol 22 PaneInfo list for this workspace",
+		"Herdr must return a complete v0.9.1/protocol 22 PaneInfo list for this workspace",
 	);
 	const piPanes = listed.panes.filter((pane) => pane.agent === "pi");
 	assert.deepEqual(

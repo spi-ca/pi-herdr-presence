@@ -20,7 +20,7 @@
   },
   "overrides": [
     {
-      "includes": ["test/fixtures/herdr-agent-state-v8.ts"],
+      "includes": ["test/fixtures/herdr-agent-state-v9.ts"],
       "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
     }
   ],

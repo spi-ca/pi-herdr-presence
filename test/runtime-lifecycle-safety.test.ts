@@ -893,7 +893,8 @@ test("max ordinal rotation withdraws owned retained sources and accepts reset sn
 });
 
 test("detached lifecycle overflow drops the complete uncoalesced sequence", async () => {
-  const runtime = new PresenceRuntime(makeBus() as never, { ...{ ...resolvePresenceConfig(), soleReporter: true }, timeoutMs: 1 });
+  // Keep the detached startup pending while the synchronous overflow burst is appended.
+  const runtime = new PresenceRuntime(makeBus() as never, { ...{ ...resolvePresenceConfig(), soleReporter: true }, timeoutMs: 1_000 });
   const context = { mode: "tui", sessionManager: { getSessionId: () => "root" } };
   const starting = runtime.startSession(context);
   for (let index = 0; index <= 64; index += 1) runtime.handleAgentStart(context);
