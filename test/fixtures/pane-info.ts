@@ -20,7 +20,7 @@ export type PaneInfoFixture = {
   revision: number;
 };
 
-/** Complete schema-faithful Herdr 0.9.0 PaneInfo fixture. */
+/** Complete schema-faithful Herdr 0.9.1 PaneInfo fixture. */
 export const paneInfo = (overrides: Partial<PaneInfoFixture> = {}): PaneInfoFixture => ({
   pane_id: "pane",
   terminal_id: "terminal",

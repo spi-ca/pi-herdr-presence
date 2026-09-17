@@ -132,7 +132,7 @@ const exactMetadataTokens = (value: unknown): value is HerdrMetadataTokens => {
 const sessionRef = (p:Record<string,unknown>) => safeText(p.agent_session_id,128) && p.agent_session_path === undefined;
 /** The workspace projection is limited to the pane projection's existing safe summary grammar. */
 export const isCanonicalSummary = (value: unknown): value is string => parseSummary(value) !== undefined;
-/** Herdr 0.9.0's serialized PaneInfo status enum. */
+/** Herdr 0.9.1's serialized PaneInfo status enum. */
 const PANE_AGENT_STATUSES = new Set(["idle", "working", "blocked", "done", "unknown"]);
 const PANE_INFO_REQUIRED_KEYS = ["pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision"] as const;
 const PANE_INFO_OPTIONAL_IGNORED_TEXT_KEYS = ["cwd", "foreground_cwd", "label", "title", "terminal_title", "terminal_title_stripped", "display_agent"] as const;
@@ -182,7 +182,7 @@ type WorkspacePaneInfo = {
  focused: boolean; agent_status: "idle" | "working" | "blocked" | "done" | "unknown";
  revision: number; agent?: string | null;
 };
-/** A scoped read is usable only when every bounded, schema-faithful 0.9.0 PaneInfo names that workspace and a unique pane. */
+/** A scoped read is usable only when every bounded, schema-faithful 0.9.1 PaneInfo names that workspace and a unique pane. */
 export function isExactWorkspacePaneListResult(value: unknown, workspaceId: string): value is { type: "pane_list"; panes: WorkspacePaneInfo[] } {
  if (!safeOpaqueId(workspaceId) || !isPlainObject(value) || !ownData(value, ["type", "panes"], ["type", "panes"]) || value.type !== "pane_list" || !isCanonicalArray(value.panes) || value.panes.length > 128) return false;
  const paneIds = new Set<string>();
