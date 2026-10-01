@@ -101,6 +101,8 @@ Attempts never overlap. Replacement and teardown stop the timer, fence the lease
 
 Mode selection is fail-closed and is detailed in [configuration](configuration.md#managed-marker-and-mode-selection). Both modes own a bounded presentation/token projection; only standalone owns `herdr:pi` session and lifecycle authority.
 
+Native ID-only resume 기본값, custom/native dedupe 차이, 비원자적 session/argv 교체 및 독립 subprocess reporter의 소유권 한계는 [resume 안전성 설계](resume-argv-safety.md)를 참조한다. 이 문서는 custom argv나 신규 subprocess guard를 구현하지 않는다.
+
 ```mermaid
 flowchart TD
   Start[Validated TUI session] --> Probe{Managed marker result}

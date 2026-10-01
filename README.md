@@ -37,6 +37,7 @@ Authoritative references:
 
 Supporting references:
 
+- [Resume argv 안전성 설계와 custom 보고 보류 조건](docs/resume-argv-safety.md)
 - [Shared V2 producer integration](docs/pi-subagent-integration.md)
 - [Development, coverage, and manual smoke verification](docs/development.md)
 
