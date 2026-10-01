@@ -37,6 +37,8 @@ All values are read from the environment. Booleans are case-insensitive after su
 
 The current compatibility target is Herdr application `v0.9.3` with protocol `22`. This is distinct from `HERDR_INTEGRATION_VERSION=9` in Herdr's managed `herdr-agent-state.ts` asset: `9` identifies that managed integration asset and does not identify the Herdr application or socket protocol version.
 
+Resume는 standalone의 native ID-only 보고를 유지하고 companion의 session/resume 보고는 이 확장에서 하지 않는다. `resume_argv` 생략이 native resume를 끄지는 않는다. Custom argv 보류 조건과 ID 조회·저장소 제약은 [resume 안전성 설계](resume-argv-safety.md)를 참조한다.
+
 ## Managed marker and mode selection
 
 The extension non-executingly inspects `extensions/herdr-agent-state.ts` under Pi's agent directory. It accepts a managed file only when it is a stable regular file no larger than 64 KiB and contains the exact marker `HERDR_INTEGRATION_ID=pi`; the bounded probe has a 250 ms deadline. Symlinks, unsafe/non-regular/oversized/mutating files, read errors, malformed configuration, and timeouts are `unknown` and fail closed.
