@@ -86,6 +86,48 @@ const notices = (requests: Request[]) => requests.filter((request) => request.me
 const metadata = (requests: Request[]) => requests.filter((request) => request.method === "pane.report_metadata").map((request) => request.params.tokens as Record<string, string | null>);
 const reportMessages = (requests: Request[]) => requests.filter((request) => request.method === "pane.report_agent").map((request) => request.params.message);
 
+test("handled nested failures do not fail a successful parent; unhandled parent failures still fail", async () => {
+  await withRuntime("all", async (runtime, events, requests) => {
+    events.getAllTools = () => [{ name: "todo", sourceInfo: { path: "/todo", source: "project", scope: "project", origin: "top" } }];
+    const internal = runtime as unknown as { context: object; toolFailed: boolean; lastTodoState: unknown; terminalRecords: Array<{ outcome: string }> };
+    const context = internal.context;
+    const todo = { type: "tool_result", toolName: "todo", toolCallId: "parent/1", parentToolCallId: "parent", isError: false, details: { action: "list", params: {}, nextId: 3, tasks: [{ id: 1, status: "completed", subject: "PRIVATE_TASK" }, { id: 2, status: "pending" }] } };
+    runtime.handleAgentStart(context);
+    runtime.handleToolResult(todo, context);
+    expect(internal.lastTodoState).toMatchObject({ progress: { completed: 1, total: 2 } });
+    const progress = internal.lastTodoState;
+    runtime.handleToolResult({ ...todo, toolCallId: "parent/2", isError: true }, context);
+    runtime.handleToolResult({ ...todo, toolCallId: "parent/3/1", parentToolCallId: "parent/3", isError: true }, context);
+    expect(internal.lastTodoState).toBe(progress);
+    for (const parentToolCallId of [null, "", 1, {}]) {
+      runtime.handleToolResult({ isError: true, parentToolCallId }, context);
+      expect(internal.toolFailed).toBe(false);
+    }
+    let reads = 0;
+    const accessor = { isError: true };
+    Object.defineProperty(accessor, "parentToolCallId", { get() { reads += 1; return undefined; } });
+    runtime.handleToolResult(accessor, context);
+    expect(reads).toBe(0);
+    expect(internal.toolFailed).toBe(false);
+    expect(internal.terminalRecords).toHaveLength(0);
+    runtime.handleToolResult({ toolName: "codemode", toolCallId: "parent", isError: false }, context);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "toolUse" }] }, context);
+    runtime.handleAgentSettled(context);
+    expect(internal.terminalRecords).toMatchObject([{ outcome: "completed" }]);
+    await pause();
+    expect(notices(requests).some(request => request.params.sound === "request")).toBe(false);
+    expect(JSON.stringify(metadata(requests))).not.toContain("PRIVATE_TASK");
+
+    runtime.handleAgentStart(context);
+    runtime.handleToolResult({ ...todo, isError: true }, context);
+    runtime.handleToolResult({ toolName: "codemode", toolCallId: "parent", parentToolCallId: undefined, isError: true }, context);
+    expect(internal.toolFailed).toBe(true);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "toolUse" }] }, context);
+    runtime.handleAgentSettled(context);
+    expect(internal.terminalRecords).toMatchObject([{ outcome: "completed" }, { outcome: "failed" }]);
+  }, 1_000);
+});
+
 test("retained V2 state is consumed once and consumer-ready does not recurse through the synchronous bus", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-retained-v2-"));
   const socket = join(directory, "socket");
@@ -214,4 +256,7 @@ test("deriveTerminalState preserves retry recovery, failures, cancellation, and 
   expect(deriveTerminalState({ messages: [{ stopReason: "error" }] })).toBe("error");
   expect(deriveTerminalState({ messages: [{ stopReason: "aborted" }] })).toBe("cancelled");
   expect(deriveTerminalState({}, true)).toBe("error");
+  expect(deriveTerminalState({ messages: [{ stopReason: "toolUse" }] }, true)).toBe("error");
+  expect(deriveTerminalState({ messages: [{ stopReason: "toolUse" }] }, false)).toBe("success");
+  expect(deriveTerminalState({ messages: [{ stopReason: "error" }, { stopReason: "length" }] }, true)).toBe("success");
 });

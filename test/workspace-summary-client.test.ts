@@ -34,6 +34,25 @@ test("a full v0.9 PaneInfo fixture publishes only for this pane as the sole Pi a
   });
 });
 
+test("v0.9.3 restore_error admission leaves sole-Pi selection and outgoing metadata unchanged", async () => {
+  for (const pane of [paneInfo({ pane_id: "this-pane" }), paneInfo({ pane_id: "this-pane", restore_error: null }), paneInfo({ pane_id: "this-pane", restore_error: "PRIVATE_RESTORE_ERROR" })]) {
+    const { client, requests } = runWith({ type: "pane_list", panes: [pane, paneInfo({ pane_id: "shell", agent: null, restore_error: "PRIVATE_SHELL_ERROR" })] });
+    await client.workspaceMainSummary("idle");
+    expect(requests.map(request => request.method)).toEqual(["pane.list", "workspace.report_metadata"]);
+    expect(requests[1]!.params).toEqual({ workspace_id: "workspace", source: "herdr:pi-presence", seq: expect.any(Number), ttl_ms: WORKSPACE_MAIN_SUMMARY_TTL_MS, tokens: { main_summary: "idle" } });
+    expect(JSON.stringify(requests)).not.toContain("PRIVATE_");
+    expect(JSON.stringify(requests)).not.toContain("restore_error");
+  }
+  for (const restore_error of [1, {}, "x".repeat(513), "😀".repeat(129), "bad\ntext", "\u202e"]) {
+    const { client, requests } = runWith({ type: "pane_list", panes: [{ ...paneInfo({ pane_id: "this-pane" }), restore_error }] });
+    await client.workspaceMainSummary("idle");
+    expect(requests.map(request => request.method)).toEqual(["pane.list"]);
+  }
+  const { client, requests } = runWith({ type: "pane_list", panes: [paneInfo({ pane_id: "this-pane", restore_error: "error" }), paneInfo({ pane_id: "other" })] });
+  await client.workspaceMainSummary("idle");
+  expect(requests.map(request => request.method)).toEqual(["pane.list"]);
+});
+
 test("workspace summary ignores nullable, absent, and non-Pi PaneInfo agents while retaining the sole Pi", async () => {
   const { client, requests } = runWith({
     type: "pane_list",

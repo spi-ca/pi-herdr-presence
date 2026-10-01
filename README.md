@@ -12,6 +12,8 @@ pi install -l git:github.com/spi-ca/pi-herdr-presence@v20260907-2
 
 Use an absolute checkout path for local development and run `/reload` after changing it.
 
+Compatibility baseline: Pi `0.99.2` development types and Herdr `v0.9.3` / protocol `22`; managed integration asset version `9` is unchanged.
+
 ## At a glance
 
 The extension starts only for a valid Herdr TUI identity (`HERDR_ENV=1`, absolute `HERDR_SOCKET_PATH`, opaque `HERDR_WORKSPACE_ID`, and opaque `HERDR_PANE_ID`) and an active managed-marker result. It uses one validated Unix-socket connection per request; all observer failures are output-only.

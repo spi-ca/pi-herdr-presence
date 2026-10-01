@@ -285,7 +285,58 @@ serial("pending native prompts are discarded on replacement and shutdown", async
   }
 });
 
-serial("a pending agent end during stalled startup clears the long-running timer", async () => {
+serial("startup replay projects nested Todo counts but leaves handled child failures to the parent result", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-nested-tools-"));
+  const socket = join(directory, "socket");
+  let releaseReport!: () => void;
+  let reportSeen!: () => void;
+  const reportGate = new Promise<void>(resolve => { releaseReport = resolve; });
+  const seenReport = new Promise<void>(resolve => { reportSeen = resolve; });
+  const server = await fakeSocket(socket, async line => {
+    const request = JSON.parse(line) as Request;
+    if (request.method === "pane.report_agent") { reportSeen(); await reportGate; }
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  bus.getAllTools = () => [{ name: "todo", sourceInfo: { path: "/todo", source: "project", scope: "project", origin: "top" } }];
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), finalClearMs: 1_000 });
+  const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "root" } };
+  const todo = { type: "tool_result", toolName: "todo", toolCallId: "parent/1", parentToolCallId: "parent", isError: false, details: { action: "list", params: {}, nextId: 2, tasks: [{ id: 1, status: "completed", subject: "PRIVATE_TASK" }] } };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const starting = runtime.startSession(context);
+    await seenReport;
+    runtime.handleAgentStart(context);
+    runtime.handleToolResult(todo, context);
+    runtime.handleToolResult({ ...todo, toolCallId: "parent/2", isError: true }, context);
+    runtime.handleToolResult({ toolName: "codemode", toolCallId: "parent", isError: false }, context);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "toolUse" }] }, context);
+    runtime.handleAgentSettled(context);
+    runtime.handleAgentStart(context);
+    runtime.handleToolResult({ ...todo, isError: true }, context);
+    runtime.handleToolResult({ toolName: "codemode", toolCallId: "parent", isError: true }, context);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "toolUse" }] }, context);
+    runtime.handleAgentSettled(context);
+    const state = runtime as unknown as { pendingLifecycle: unknown; terminalRecords: unknown[]; lastTodoState: unknown; toolFailed: boolean };
+    expect(JSON.stringify(state.pendingLifecycle)).not.toContain("PRIVATE_TASK");
+    expect(JSON.stringify(state.pendingLifecycle)).not.toContain("parent/1");
+    releaseReport();
+    await starting;
+    expect(state.lastTodoState).toMatchObject({ progress: { completed: 1, total: 1 } });
+    expect(state.terminalRecords).toMatchObject([{ outcome: "completed" }, { outcome: "failed" }]);
+    expect(state.toolFailed).toBe(true);
+  } finally {
+    releaseReport?.();
+    await runtime.shutdownSession(activeContext(runtime));
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("a pending agent end during stalled startup preserves the active long-running timer", async () => {
   const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-agent-end-timer-"));
   const socket = join(directory, "socket");
   const requests: Request[] = [];
@@ -320,13 +371,21 @@ serial("a pending agent end during stalled startup clears the long-running timer
     releaseReport();
     await starting;
 
-    const internal = runtime as unknown as { longRunningTimer: unknown; longRunningRemaining: number | null; longRunningArmedAt: number | null };
+    const internal = runtime as unknown as { longRunningTimer: unknown; longRunningRemaining: number | null; longRunningArmedAt: number | null; terminalRecords: unknown[] };
+    expect(internal.longRunningTimer).not.toBeUndefined();
+    expect(internal.longRunningRemaining).toBe(20);
+    expect(internal.longRunningArmedAt).toBe(0);
+    expect(internal.terminalRecords).toHaveLength(0);
+    clock.advance(19);
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi is still working")).toHaveLength(0);
+    clock.advance(1);
+    await pause();
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi is still working")).toHaveLength(1);
+    runtime.handleAgentSettled({ ...context, isIdle: () => true });
+    expect(internal.terminalRecords).toHaveLength(1);
     expect(internal.longRunningTimer).toBeUndefined();
     expect(internal.longRunningRemaining).toBeNull();
     expect(internal.longRunningArmedAt).toBeNull();
-    clock.advance(100);
-    await pause();
-    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi is still working")).toHaveLength(0);
   } finally {
     releaseReport?.();
     await runtime.shutdownSession(activeContext(runtime));

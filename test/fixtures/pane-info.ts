@@ -6,6 +6,7 @@ export type PaneInfoFixture = {
   focused: boolean;
   cwd?: string | null;
   foreground_cwd?: string | null;
+  restore_error?: string | null;
   label?: string | null;
   agent?: string | null;
   title?: string | null;
@@ -20,7 +21,7 @@ export type PaneInfoFixture = {
   revision: number;
 };
 
-/** Complete schema-faithful Herdr 0.9.1 PaneInfo fixture. */
+/** Complete schema-faithful Herdr 0.9.3 PaneInfo fixture (restore_error omitted unless supplied). */
 export const paneInfo = (overrides: Partial<PaneInfoFixture> = {}): PaneInfoFixture => ({
   pane_id: "pane",
   terminal_id: "terminal",

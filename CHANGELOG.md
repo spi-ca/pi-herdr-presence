@@ -1,5 +1,13 @@
 # 변경 이력
 
+## v20261001-1
+
+- Update the compatibility baseline to Pi `0.99.2` and Herdr `v0.9.3`; protocol `22` and managed integration asset `9` are unchanged. Admit optional nullable `PaneInfo.restore_error` only as bounded ignored text; workspace selection and outgoing metadata are unchanged. No `resume_argv` is emitted.
+- Pin the host development dependency and locked CI Pi graph to `0.99.2`, including `pi-codemode`/`pi-mcp`. Retain the older `0.85.1` regression lane, removing non-runtime `pi-client`/`pi-protocol` entries. The host peer remains `*`.
+- Successful nested Todo results project aggregate counts only. Handled nested failures no longer poison the parent-turn failure fallback; a failed top-level parent still sets the failure fallback. Live and startup replay regressions cover both paths.
+- CI regressions now wait for notification dispatch and completion-relative lease arming rather than assuming a received metadata request means later work has completed.
+- Preserve the active long-running timer and accumulated working-time budget across `agent_end` continuations; final settlement, replacement, and shutdown still clear it. Regression tests cover live continuations, deferred next starts, and stalled-startup replay.
+
 ## v20260917-1
 
 - Compatibility baseline is Herdr `v0.9.1` / protocol `22` and its managed Pi integration asset version `9`. The managed-marker and socket envelopes are unchanged; the reviewed v9 fixture adds Windows absolute session-path handling.

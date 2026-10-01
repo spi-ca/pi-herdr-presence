@@ -66,20 +66,21 @@ test("runtime publishes immediately, refreshes through its lease timer, and stop
   const scheduler = new ManualScheduler();
   const fixture = await workspaceRuntime("herdr-workspace-heartbeat-", (request) => {
     requests.push(request);
-    return JSON.stringify({ id: request.id, result: request.method === "pane.list" ? { type: "pane_list", panes: [paneInfo()] } : { type: "ok" } });
+    return JSON.stringify({ id: request.id, result: request.method === "pane.list" ? { type: "pane_list", panes: [paneInfo({ restore_error: "PRIVATE_RESTORE_ERROR" })] } : { type: "ok" } });
   }, scheduler);
   const { runtime } = fixture;
   const sessionContext = context("session");
   try {
     await runtime.startSession(sessionContext);
-    await until(() => requests.some(request => request.method === "workspace.report_metadata"));
+    // The request is observed before its response completes; cadence arms only afterward.
+    await until(() => requests.some(request => request.method === "workspace.report_metadata") && scheduler.active.length === 1);
     expect(requests.filter(request => request.method === "workspace.report_metadata").at(-1)?.params.tokens).toEqual({ main_summary: "idle" });
     expect(scheduler.active).toHaveLength(1);
 
     runtime.handleAgentStart(sessionContext);
     await until(() => requests.some(request => request.method === "pane.report_metadata" && (request.params.tokens as Record<string, string | null>).summary === "working"));
     expect(scheduler.fireNext()).toBe(true);
-    await until(() => (requests.filter(request => request.method === "workspace.report_metadata").at(-1)?.params.tokens as Record<string, string> | undefined)?.main_summary === "working");
+    await until(() => (requests.filter(request => request.method === "workspace.report_metadata").at(-1)?.params.tokens as Record<string, string> | undefined)?.main_summary === "working" && scheduler.active.length === 1);
 
     await runtime.shutdownSession(sessionContext);
     const workspaceCount = requests.filter(request => request.method === "workspace.report_metadata").length;
@@ -87,6 +88,8 @@ test("runtime publishes immediately, refreshes through its lease timer, and stop
     expect(scheduler.fireNext()).toBe(false);
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(requests.filter(request => request.method === "workspace.report_metadata")).toHaveLength(workspaceCount);
+    expect(JSON.stringify(requests)).not.toContain("PRIVATE_RESTORE_ERROR");
+    expect(JSON.stringify(requests)).not.toContain("restore_error");
   } finally {
     await runtime.shutdownSession(sessionContext);
     restore(fixture.saved);
@@ -111,7 +114,7 @@ test("terminal metadata supplies the latest summary to the next workspace lease 
   const producer = createPresenceProducer({ source: "subagent", emit: (name: unknown, payload: unknown) => runtime.handlePresenceEvent(name, payload) })!;
   try {
     await runtime.startSession(sessionContext);
-    await until(() => requests.some(request => request.method === "workspace.report_metadata"));
+    await until(() => requests.some(request => request.method === "workspace.report_metadata") && scheduler.active.length === 1);
     expect(scheduler.active).toHaveLength(1);
     expect(producer.activate()).toBe(true);
     expect(producer.publishTerminal({ version: 2, generation: 1, sequence: 1, source: "subagent", eventId: 1, outcome: "completed" })).toBe(true);

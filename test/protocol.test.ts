@@ -126,6 +126,26 @@ test("accepts schema-valid empty PaneInfo optional fields while preserving eligi
  expect(isExactWorkspacePaneListResult({ type: "pane_list", panes: [paneInfo({ agent_session: { source: "", agent: "", kind: "path", value: "\u0000" } })] }, "workspace")).toBe(false);
 });
 
+test("v0.9.3 restore_error is bounded ignored nullable text, not an arbitrary extra field", () => {
+ const admits = (pane: unknown) => isExactWorkspacePaneListResult({ type: "pane_list", panes: [pane] }, "workspace");
+ expect(admits(paneInfo())).toBe(true); // Missing, as serialized by Option::None.
+ for (const restore_error of [null, "", "Session restore failed", "x".repeat(512), "😀".repeat(128)]) {
+  expect(admits(paneInfo({ restore_error }))).toBe(true);
+ }
+ for (const restore_error of [undefined, 1, false, {}, [], "x".repeat(513), "😀".repeat(129), "error\ntext", "\u0000", "\u001b", "\u202e"]) {
+  expect(admits({ ...paneInfo(), restore_error })).toBe(false);
+ }
+ let reads = 0;
+ const accessor = paneInfo();
+ Object.defineProperty(accessor, "restore_error", { enumerable: true, get() { reads += 1; return "secret"; } });
+ expect(admits(accessor)).toBe(false);
+ expect(reads).toBe(0);
+ const inherited = Object.create({ restore_error: "secret" });
+ Object.assign(inherited, paneInfo());
+ expect(admits(inherited)).toBe(false);
+ expect(admits({ ...paneInfo(), future_error: "secret" })).toBe(false);
+});
+
 test("strictly encodes scoped workspace summary requests and bounded pane-list results", () => {
  const list = { type: "pane_list", panes: [paneInfo()] };
  expect(encodeHerdrRequest({ id: "list", method: "pane.list", params: { workspace_id: "workspace" } })).toContain('"workspace_id":"workspace"');
