@@ -1,3 +1,4 @@
+import { types } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPresenceConsumer, createPresenceProducer, encodeTerminalBatch, MAX_INTEGER, type PresenceConsumerHandle, type PresenceEventV2, type PresenceProducerHandle, type PresenceStateInputV2, type PresenceStateV2, type PresenceTerminalV2, type TerminalBatch } from "@pi/presence";
 import { PresenceClient, type SessionRef } from "./client.js";
@@ -12,7 +13,7 @@ import { HerdrSocketTransport, type QueueDisposition } from "./transport.js";
 import { WorkspaceSummaryLease, type WorkspaceSummaryScheduler } from "./workspace-summary.js";
 import { TodoProgressAdapter } from "./todo.js";
 import { UsageTracker } from "./usage.js";
-import { hasControlOrBidi } from "./validation.js";
+import { hasControlOrBidi, isPlainObject } from "./validation.js";
 
 const MAX_NOTIFICATION_TRANSITIONS = Number.MAX_SAFE_INTEGER;
 const MAX_TERMINALS = 3;
@@ -124,6 +125,17 @@ function deriveContextPercent(context: ContextUsageProvider): number | undefined
   } catch { return undefined; }
 }
 
+/** Nested failures reach the caller only: a handled child error is not a failed parent turn. */
+function isTopLevelToolFailure(event: unknown): boolean {
+  try {
+    if (types.isProxy(event) || !isPlainObject(event)) return false;
+    const parent = Object.getOwnPropertyDescriptor(event, "parentToolCallId");
+    if (parent && (!("value" in parent) || parent.value !== undefined)) return false;
+    const error = Object.getOwnPropertyDescriptor(event, "isError");
+    return error !== undefined && "value" in error && error.value === true;
+  } catch { return false; }
+}
+
 /** The last terminal message wins: an automatic retry can legitimately recover an earlier failure. */
 export function deriveTerminalState(event: unknown, toolFailed = false): Terminal {
   return deriveExplicitTerminal(event) ?? (toolFailed ? "error" : "success");
@@ -137,7 +149,10 @@ function deriveExplicitTerminal(event: unknown): Terminal | undefined {
     const reason = (messages[index] as { stopReason?: unknown })?.stopReason;
     if (reason === "aborted" || reason === "cancelled") return "cancelled";
     if (reason === "error") return "error";
-    if (typeof reason === "string") return "success";
+    if (reason === "stop" || reason === "length") return "success";
+    // A tool-only ending has no later assistant recovery response. Resolve
+    // only from this run's top-level tool result, including startup replay.
+    if (reason === "toolUse") return undefined;
   }
   return undefined;
 }
@@ -875,7 +890,6 @@ export class PresenceRuntime {
       return;
     }
     this.terminal = deriveTerminalState(event, this.toolFailed);
-    this.resetLongRunningTimer();
   }
 
   handleAgentSettled(context: unknown) {
@@ -943,13 +957,13 @@ export class PresenceRuntime {
 
   /** Reduce a detached tool payload immediately to error/count state before retaining it. */
   private derivePendingTool(event: unknown): PendingLifecycleEdge {
-    const failed = (event as { isError?: unknown })?.isError === true;
+    const failed = isTopLevelToolFailure(event);
     let todo: PresenceStateInputV2 | null = null;
     try { todo = this.todo.accept(event, this.pi.getAllTools(), 0, 0); } catch {}
     return { kind: "tool_result", failed, ...(todo ? { todo: { state: todo.state, ...(todo.progress ? { progress: todo.progress } : {}) } } : {}) };
   }
   private applyToolResult(event: unknown) {
-    if ((event as { isError?: unknown })?.isError === true && this.active) this.toolFailed = true;
+    if (isTopLevelToolFailure(event) && this.active) this.toolFailed = true;
     this.activateLocalCandidates();
     const ordinal = this.nextLocalOrdinal();
     if (!ordinal) return;
@@ -972,7 +986,7 @@ export class PresenceRuntime {
       switch (edge.kind) {
         case "agent_start": this.startActiveAgent(pending.context); break;
         case "turn_start": if (edge.contextPercent !== undefined) this.usage.setContext({ contextPercent: edge.contextPercent }); break;
-        case "agent_end": this.terminal = edge.terminal ?? (this.toolFailed ? "error" : "success"); this.resetLongRunningTimer(); break;
+        case "agent_end": this.terminal = edge.terminal ?? (this.toolFailed ? "error" : "success"); break;
         case "agent_settled": this.settleActiveAgent(fence); break;
         case "message_end": this.usage.add(edge.usage); this.updateContextUsage(); this.render(); break;
         case "tool_result": this.applyDerivedTool(edge); break;
@@ -1680,7 +1694,7 @@ export class PresenceRuntime {
     this.notify("long-running", `long-running:${turn}`, "Pi is still working", "A Pi task is taking longer than expected", "local");
   }
 
-  /** Agent end/settlement, replacement, and shutdown erase every timer fence and budget. */
+  /** Final settlement, replacement, and shutdown erase every timer fence and budget. */
   private resetLongRunningTimer() {
     if (this.longRunningTimer) this.longRunningScheduler.clearTimeout(this.longRunningTimer);
     this.longRunningTimer = undefined;

@@ -317,7 +317,7 @@ serial(
 					),
 				).toBe(true),
 			);
-			expect(requests.filter((request) => request.method === "notification.show")).toHaveLength(1);
+			await eventually(() => expect(requests.filter((request) => request.method === "notification.show")).toHaveLength(1));
 		}),
 );
 serial(

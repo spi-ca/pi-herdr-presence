@@ -576,26 +576,93 @@ serial(
 	},
 );
 serial(
-	"agent end, settlement, replacement, and shutdown clear long-running state",
+	"agent end preserves the active timer through a retry and emits no terminal before settlement",
 	async () => {
 		const clock = new ManualLongRunningScheduler();
 		await withRuntime({ notificationPolicy: "background", longRunningMs: 20 }, async ({ runtime, requests }) => {
-			const internal = runtime as unknown as { context: object; longRunningRemaining: number | null; longRunningTimer: unknown };
+			const internal = runtime as unknown as {
+				context: object;
+				longRunningRemaining: number | null;
+				longRunningTimer: unknown;
+				terminalRecords: unknown[];
+			};
+			const context = internal.context;
+			runtime.handleAgentStart(context);
+			clock.elapse(10);
+			runtime.handleAgentEnd({}, context);
+			runtime.handleAgentStart(context);
+			runtime.handleAgentEnd({}, context);
+			expect(internal.longRunningRemaining).toBe(20);
+			expect(internal.longRunningTimer).not.toBeUndefined();
+			expect(internal.terminalRecords).toHaveLength(0);
+			clock.advance(9);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			clock.advance(1);
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			runtime.handleAgentSettled({ ...(context as object), isIdle: () => true });
+			expect(internal.terminalRecords).toHaveLength(1);
+			expect(internal.longRunningRemaining).toBeNull();
+		}, clock);
+	},
+);
+serial(
+	"replacement and shutdown clear the active long-running budget",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		await withRuntime({ notificationPolicy: "background", longRunningMs: 20 }, async ({ runtime, requests }) => {
+			const internal = runtime as unknown as {
+				context: object;
+				longRunningRemaining: number | null;
+				longRunningTimer: unknown;
+			};
+			const initial = internal.context;
+			runtime.handleAgentStart(initial);
+			expect(internal.longRunningRemaining).toBe(20);
+
+			const replacement = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
+			await runtime.startSession(replacement);
+			expect(internal.longRunningRemaining).toBeNull();
+			expect(internal.longRunningTimer).toBeUndefined();
+			clock.advance(100);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+
+			runtime.handleAgentStart(replacement);
+			expect(internal.longRunningRemaining).toBe(20);
+			await runtime.shutdownSession(replacement);
+			expect(internal.longRunningRemaining).toBeNull();
+			expect(internal.longRunningTimer).toBeUndefined();
+			clock.advance(100);
+			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+		}, clock);
+	},
+);
+serial(
+	"settlement clears the prior budget and a deferred agent start gets one fresh timer",
+	async () => {
+		const clock = new ManualLongRunningScheduler();
+		await withRuntime({ notificationPolicy: "background", longRunningMs: 20 }, async ({ runtime, requests }) => {
+			const internal = runtime as unknown as {
+				context: object;
+				longRunningRemaining: number | null;
+				terminalRecords: unknown[];
+			};
 			const context = internal.context;
 			runtime.handleAgentStart(context);
 			runtime.handleAgentEnd({}, context);
-			expect(internal.longRunningRemaining).toBeNull();
 			runtime.handleAgentSettled({ ...(context as object), isIdle: () => true });
+			expect(internal.terminalRecords).toHaveLength(1);
+			expect(internal.longRunningRemaining).toBeNull();
+			await Promise.resolve();
 			runtime.handleAgentStart(context);
-			await runtime.startSession({ mode: "tui", sessionManager: { getSessionId: () => "replacement" } });
-			expect(internal.longRunningRemaining).toBeNull();
-			const replacement = internal.context;
-			runtime.handleAgentStart(replacement);
-			await runtime.shutdownSession(replacement);
-			expect(internal.longRunningRemaining).toBeNull();
-			clock.advance(100);
-			await sleep();
+			expect(internal.terminalRecords).toHaveLength(1);
+			expect(internal.longRunningRemaining).toBe(20);
+			clock.advance(19);
 			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			clock.advance(1);
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			runtime.handleAgentEnd({}, context);
+			runtime.handleAgentSettled({ ...(context as object), isIdle: () => true });
+			expect(internal.terminalRecords).toHaveLength(2);
 		}, clock);
 	},
 );

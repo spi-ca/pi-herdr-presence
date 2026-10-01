@@ -292,12 +292,14 @@ serial(
 			await eventually(() =>
 				expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true),
 			);
+			// Metadata can precede notification dispatch. End only a committed input lifecycle.
+			await eventually(() => expect(notices(requests)).toHaveLength(1));
 			p.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
 			p.publishState(input(1, 2));
 			await eventually(() =>
 				expect(metas(requests).filter((request) => tokens(request).v2_interaction === "ask_user:1").length).toBeGreaterThan(1),
 			);
-			expect(notices(requests)).toHaveLength(2);
+			await eventually(() => expect(notices(requests)).toHaveLength(2));
 		}),
 );
 serial(

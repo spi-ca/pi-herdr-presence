@@ -30,6 +30,15 @@ test("todo V2 projection omits task text", () => {
   expect(JSON.stringify(result)).not.toContain("secret");
 });
 
+test("nested Todo success projects counts only; nested and top-level errors never replace progress", () => {
+  const adapter = new TodoProgressAdapter();
+  const event = { type: "tool_result", toolCallId: "parent/1", parentToolCallId: "parent", toolName: "todo", isError: false, content: [{ type: "text", text: "PRIVATE_RESULT" }], details: { action: "list", params: { text: "PRIVATE_ARGS" }, error: "PRIVATE_IGNORED_ERROR", nextId: 3, tasks: [{ id: 1, status: "completed", subject: "PRIVATE_TASK" }, { id: 2, status: "in_progress" }] } };
+  expect(adapter.accept(event, tools, 1, 1)).toEqual({ version: 2, source: "todo", generation: 1, sequence: 1, state: "running", progress: { completed: 1, total: 2 } });
+  expect(adapter.accept({ ...event, isError: true }, tools, 1, 2)).toBeNull();
+  expect(adapter.accept({ ...event, parentToolCallId: undefined, isError: true }, tools, 1, 3)).toBeNull();
+  expect(adapter.accept({ ...event, details: { ...event.details, tasks: [{ id: 1, status: "invalid" }] } }, tools, 1, 4)).toBeNull();
+});
+
 test("todo rejects duplicate IDs", () => {
   expect(new TodoProgressAdapter().accept(
     { toolName: "todo", isError: false, details: { action: "list", params: {}, nextId: 3, tasks: [{ id: 1, status: "pending" }, { id: 1, status: "pending" }] } },
