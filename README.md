@@ -12,7 +12,7 @@ pi install -l git:github.com/spi-ca/pi-herdr-presence@v20260907-2
 
 Use an absolute checkout path for local development and run `/reload` after changing it.
 
-Compatibility baseline: Pi `0.99.2` development types and Herdr `v0.9.3` / protocol `22`; managed integration asset version `9` is unchanged.
+Compatibility baseline: Pi `1.0.2` development types and Herdr `v0.9.3` / protocol `22`; managed integration asset version `9` is unchanged.
 
 ## At a glance
 
