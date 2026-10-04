@@ -1,5 +1,11 @@
 # 변경 이력
 
+## v20261004-1
+
+- Shared `@pi/presence`를 immutable `v2-20261004-1`로 동기화했습니다. 기존 release와 peeled commit·V2 protocol·ABI는 같습니다.
+
+- Synchronize exact Pi host development dependencies, lockfile, and baseline CI graph to `1.0.2`. Herdr protocol, presence output, and authority are unchanged.
+
 ## v20261001-1
 
 - Update the compatibility baseline to Pi `0.99.2` and Herdr `v0.9.3`; protocol `22` and managed integration asset `9` are unchanged. Admit optional nullable `PaneInfo.restore_error` only as bounded ignored text; workspace selection and outgoing metadata are unchanged. No `resume_argv` is emitted.
