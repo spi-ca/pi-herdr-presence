@@ -866,3 +866,100 @@ serial("a root-session Todo reset lets an immediate pending lifecycle claim exac
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+serial("pending cancellation retains only a boolean and replays in order without a success notification", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-cancelled-"));
+  const socket = join(directory, "socket");
+  const requests: Request[] = [];
+  let markCancelled!: () => void;
+  const cancelledMetadata = new Promise<void>(resolve => { markCancelled = resolve; });
+  const server = await fakeSocket(socket, line => {
+    const request = JSON.parse(line) as Request;
+    requests.push(request);
+    const tokens = request.params.tokens as Record<string, unknown> | undefined;
+    if (request.method === "pane.report_metadata" && tokens?.summary === "idle · terminal cancelled" && String(tokens.v2_terminals).includes("pi:1:3:cancelled")) markCancelled();
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const hooks = new Map<string, (event: unknown, context: unknown) => unknown>();
+  const pi = { ...bus, on(name: string, listener: (event: unknown, context: unknown) => unknown) { hooks.set(name, listener); } };
+  const runtime = new PresenceRuntime(pi as never, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all", finalClearMs: 1_000 });
+  const context = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "root" } };
+  const state = runtime as unknown as { pendingLifecycle: { edges: unknown[] } | null; terminalRecords: unknown[]; lastPiState: unknown; active: boolean; longRunningRemaining: number | null };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(pi as never, runtime);
+    const starting = runtime.startSession(context);
+    // Capture before any asynchronous probe can finish. Every replay edge is
+    // derived now, not from a retained event payload or context abort signal.
+    for (const window of ["tool", "retry", "compaction"] as const) {
+      runtime.handleAgentStart(context);
+      if (window === "tool") runtime.handleToolResult({ isError: true, content: [{ text: "PRIVATE_TOOL" }] }, context);
+      runtime.handleAgentEnd({ messages: [{ stopReason: window === "tool" ? "toolUse" : window === "retry" ? "error" : "stop" }] }, context);
+      const event = { type: "agent_settled", aborted: true, text: "PRIVATE_SETTLEMENT" };
+      hooks.get("agent_settled")!(event, { ...context });
+      event.aborted = false;
+    }
+    expect(state.pendingLifecycle?.edges.filter(edge => (edge as { kind: string }).kind === "agent_settled")).toEqual([
+      { kind: "agent_settled", aborted: true }, { kind: "agent_settled", aborted: true }, { kind: "agent_settled", aborted: true },
+    ]);
+    expect(JSON.stringify(state.pendingLifecycle)).not.toContain("PRIVATE_");
+    await starting;
+    expect(state.active).toBe(false);
+    expect(state.lastPiState).toMatchObject({ state: "cancelled" });
+    expect(state.terminalRecords).toMatchObject([{ outcome: "cancelled" }, { outcome: "cancelled" }, { outcome: "cancelled" }]);
+    expect(state.longRunningRemaining).toBeNull();
+    await cancelledMetadata;
+    expect(requests.filter(request => request.method === "notification.show")).toHaveLength(0);
+    expect(requests.some(request => request.method === "pane.report_metadata" && (request.params.tokens as Record<string, unknown>).summary === "idle · terminal cancelled")).toBe(true);
+    expect(JSON.stringify(requests)).not.toContain("PRIVATE_");
+  } finally {
+    await runtime.shutdownSession(context);
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+serial("replacement fences pending and stale aborted settlement while normal pending retry still completes", async () => {
+  const directory = await fs.mkdtemp(join(os.tmpdir(), "herdr-startup-cancellation-fence-"));
+  const socket = join(directory, "socket");
+  const server = await fakeSocket(socket, line => {
+    const request = JSON.parse(line) as Request;
+    return JSON.stringify({ id: request.id, result: {} });
+  });
+  const saved = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
+  const bus = makeBus();
+  const runtime = new PresenceRuntime(bus as never, { ...resolvePresenceConfig(), soleReporter: true, finalClearMs: 1_000 });
+  const stale = { mode: "tui", isIdle: () => true, sessionManager: { getSessionId: () => "root" } };
+  const current = { ...stale, sessionManager: { getSessionId: () => "root" } };
+  const state = runtime as unknown as { pendingLifecycle: { edges: unknown[] } | null; terminalRecords: unknown[]; terminal: string; active: boolean };
+  try {
+    Object.assign(process.env, { HERDR_ENV: "1", HERDR_SOCKET_PATH: socket, HERDR_PANE_ID: "pane", HERDR_WORKSPACE_ID: "workspace", PI_CODING_AGENT_DIR: join(directory, "missing-agent-dir") });
+    registerPresenceHooks(bus as never, runtime);
+    const oldStart = runtime.startSession(stale);
+    runtime.handleAgentStart(stale);
+    runtime.handleAgentSettled(stale, true);
+    const newStart = runtime.startSession(current);
+    runtime.handleAgentStart(current);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "error" }] }, current);
+    runtime.handleAgentSettled(stale, true);
+    expect(state.pendingLifecycle?.edges).toHaveLength(2);
+    runtime.handleAgentStart(current);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "stop" }] }, current);
+    runtime.handleAgentSettled(current);
+    await Promise.all([oldStart, newStart]);
+    expect(state.terminalRecords).toMatchObject([{ outcome: "completed" }]);
+    expect(state.terminal).toBe("success");
+    expect(state.active).toBe(false);
+    runtime.handleAgentSettled(stale, true);
+    expect(state.terminal).toBe("success");
+    expect(state.terminalRecords).toHaveLength(1);
+  } finally {
+    await runtime.shutdownSession(current);
+    restore(saved);
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

@@ -524,6 +524,7 @@ test("all stale Pi callbacks are fenced by their context", async () => {
     await hook("message_end", { type: "message_end", message: { role: "assistant", usage: { totalTokens: 99 } } }, prior);
     await hook("tool_result", { type: "tool_result", toolName: "todo", toolCallId: "stale", input: {}, content: [], isError: true, details: undefined }, prior);
     await hook("agent_end", { type: "agent_end", messages: [{ stopReason: "error" }] }, prior);
+    await hook("agent_settled", { type: "agent_settled", aborted: true }, prior);
     await hook("session_shutdown", { type: "session_shutdown", reason: "new" }, prior);
 
     expect(state.rootSession).toBe(true);
@@ -562,6 +563,87 @@ test("agent_end derives the terminal state and agent_settled settles it once", a
     expect(state.terminalRecords).toHaveLength(1);
     await pause();
     expect(agentRequests(requests.slice(before)).filter((request) => request.params.state === "blocked")).toHaveLength(1);
+  });
+});
+
+for (const window of ["tool", "retry", "compaction"] as const) {
+  test(`aborted settlement during the ${window} window overrides the candidate and stays quiet`, async () => {
+    await withRuntime(async (runtime, bus, requests) => {
+      const context = { ...activeContext(runtime), isIdle: () => true };
+      const hook = (name: string, event: unknown) => {
+        const listener = bus.hooks.get(name)?.[0];
+        if (!listener) throw new Error(`missing ${name} hook`);
+        return listener(event, context);
+      };
+      hook("agent_start", { type: "agent_start" });
+      // No provider: model only the observed edges before cancellation. Retry
+      // and compaction happen after agent_end, before the final settlement.
+      if (window === "tool") hook("tool_result", { isError: true, content: [{ text: "PRIVATE_TOOL" }] });
+      hook("agent_end", { messages: [{ stopReason: window === "tool" ? "toolUse" : window === "compaction" ? "stop" : "error" }] });
+      expect(internal(runtime).terminal).toBe(window === "compaction" ? "success" : "error");
+      expect(internal(runtime).active).toBe(true);
+      expect(internal(runtime).terminalRecords).toHaveLength(0);
+      hook("agent_settled", { type: "agent_settled", aborted: true, privateText: "PRIVATE_SETTLEMENT" });
+      hook("agent_settled", { type: "agent_settled", aborted: false });
+      expect(internal(runtime).active).toBe(false);
+      expect(internal(runtime).terminal).toBe("cancelled");
+      expect(internal(runtime).lastPiState).toMatchObject({ state: "cancelled" });
+      expect(internal(runtime).terminalRecords).toMatchObject([{ outcome: "cancelled" }]);
+      expect((runtime as unknown as { longRunningRemaining: number | null }).longRunningRemaining).toBeNull();
+      await pause();
+      expect(requests.filter(request => request.method === "notification.show")).toHaveLength(0);
+      expect(JSON.stringify(requests)).not.toContain("PRIVATE_");
+    }, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all" });
+  });
+}
+
+for (const settled of [{ type: "agent_settled", aborted: false }, { type: "agent_settled" }]) {
+  test(`settlement ${"aborted" in settled ? "false" : "without aborted"} preserves retry recovery and stop-reason fallback`, async () => {
+    await withRuntime(async (runtime, bus) => {
+      const context = activeContext(runtime);
+      const hook = (name: string, event: unknown) => bus.hooks.get(name)?.[0]?.(event, context);
+      hook("agent_start", {});
+      hook("agent_end", { messages: [{ stopReason: "error" }] });
+      expect(internal(runtime).active).toBe(true);
+      hook("agent_start", {});
+      hook("agent_end", { messages: [{ stopReason: "stop" }] });
+      hook("agent_settled", settled);
+      expect(internal(runtime).terminalRecords).toMatchObject([{ outcome: "completed" }]);
+      expect(internal(runtime).lastPiState).toMatchObject({ state: "success" });
+
+      hook("agent_start", {});
+      hook("agent_end", { messages: [{ stopReason: "aborted" }] });
+      hook("agent_settled", settled);
+      expect(internal(runtime).terminalRecords).toMatchObject([{ outcome: "completed" }, { outcome: "cancelled" }]);
+
+      hook("agent_start", {});
+      hook("tool_result", { isError: true });
+      hook("agent_end", { messages: [{ stopReason: "toolUse" }] });
+      hook("agent_settled", settled);
+      expect(internal(runtime).terminalRecords).toMatchObject([{ outcome: "completed" }, { outcome: "cancelled" }, { outcome: "failed" }]);
+    });
+  });
+}
+
+test("aborted settlement cannot bypass manager/ID or busy-context fences", async () => {
+  await withRuntime(async (runtime, bus) => {
+    let id = "root";
+    const manager = { getSessionId: () => id };
+    const context = { mode: "tui", sessionManager: manager, isIdle: () => true };
+    await runtime.startSession(context);
+    runtime.handleAgentStart(context);
+    runtime.handleAgentEnd({ messages: [{ stopReason: "stop" }] }, context);
+    const settled = bus.hooks.get("agent_settled")![0]!;
+    settled({ aborted: true }, { ...context, sessionManager: { getSessionId: () => id } });
+    settled({ aborted: true }, { ...context, isIdle: () => false });
+    id = "forked";
+    settled({ aborted: true }, context);
+    expect(internal(runtime).active).toBe(true);
+    expect(internal(runtime).terminal).toBe("success");
+    expect(internal(runtime).terminalRecords).toHaveLength(0);
+    id = "root";
+    settled({ aborted: true }, { ...context });
+    expect(internal(runtime).terminalRecords).toMatchObject([{ outcome: "cancelled" }]);
   });
 });
 
