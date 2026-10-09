@@ -5,7 +5,7 @@ import type { PresenceRuntime } from "./runtime.js";
 export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime): void {
  for (const name of [EVENT_NAMES.state, EVENT_NAMES.terminal, EVENT_NAMES.withdraw]) pi.events.on(name,payload=>runtime.handlePresenceEvent(name,payload));
  pi.events.on(EVENT_NAMES.consumerReady,payload=>runtime.handleConsumerReady(payload));
- pi.on("agent_settled", (_event, context) => runtime.handleAgentSettled(context));
+ pi.on("agent_settled", (event, context) => runtime.handleAgentSettled(context, "aborted" in event && event.aborted === true));
  // Startup stays detached; shutdown returns bounded cleanup for Pi to await.
  pi.on("session_start", (event, context) => { void runtime.startSession(context, event).catch(() => {}); });
  pi.on("agent_start", (_event, context) => runtime.handleAgentStart(context));

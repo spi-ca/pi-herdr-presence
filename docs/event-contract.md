@@ -2,7 +2,7 @@
 
 This is the authoritative Herdr wire-projection contract. [Architecture](architecture.md) describes ordering; [configuration](configuration.md) defines activation and lease eligibility; [feature ownership](feature-ownership.md) defines the authority boundary. The current Herdr target is application `v0.9.3`, protocol `22`; this is separate from managed integration asset `HERDR_INTEGRATION_VERSION=9`.
 
-The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/docs/lifecycle.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20261004-1/fixtures/normative.json).
+The extension consumes accepted `@pi/presence` V2 state, terminal, and withdraw events. Shared producer lifecycle, receipts, generation/sequence fences, withdrawal, and terminal encoding remain defined by the pinned [V2 API](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/api.md), [lifecycle guide](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/docs/lifecycle.md), and [terminal fixture](https://github.com/spi-ca/pi-presence/blob/v2-20261009-1/fixtures/normative.json).
 
 ## Pi tool-result and continuation semantics
 
@@ -10,7 +10,11 @@ Pi `0.99.2` emits nested `tool_result` events from `ctx.executeTool()` with `par
 
 Only a top-level tool result (`parentToolCallId` absent or an own data value of `undefined`) can set the turn failure fallback. Nested errors may be handled by their caller, so they neither mark the parent failed nor emit their own failure alert. A failed parent result still sets the fallback. Malformed/accessor-backed parent markers are not promoted to top-level failures. Explicit final assistant stop reasons retain precedence over this fallback, including retry recovery. No parent IDs, nested arguments, or error text are retained or projected.
 
-`agent_end` derives the candidate terminal but does not settle the parent turn or erase its long-running working-time budget: automatic continuations preserve it. Only `agent_settled` emits the terminal pair and clears the budget; replacement and shutdown also clear it.
+`agent_end` derives the candidate terminal but does not settle the parent turn or erase its long-running working-time budget: automatic continuations preserve it. Only `agent_settled` emits the terminal pair and clears the budget; replacement and shutdown also clear it. In Pi `1.1.0`, `agent_settled.aborted: true` overrides the `agent_end` candidate with the existing `cancelled` state and V2 `cancelled` outcome, including cancellation during tools, retry backoff, or compaction recovery. Cancellation remains quiet (no completion/failure notification). Detached startup retains only this derived boolean alongside the ordered lifecycle edges, under the same manager/ID/epoch fence. An absent `aborted` field on older hosts or `false` preserves the candidate derived from stop reasons and top-level tool failures; successful retry recovery is unchanged.
+
+## Pi native program status coexistence
+
+Pi `1.1.0` separately reports [Program Status Protocol (OSC 7501)](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/terminal-setup.md#program-status) state when the terminal confirms support. Pi owns detection and the `PI_PROGRAM_STATUS=1|0` override. Native reports can contain the session name, dialog title, or first error line; these are not inputs to this extension's privacy-bounded Herdr projection. This extension neither emits duplicate OSC reports nor sends terminal commands, and never forwards native report text. Native reporting does not replace the Herdr Unix-socket protocol, shared V2 events, or standalone/companion authority boundaries.
 
 ## Pane projection
 

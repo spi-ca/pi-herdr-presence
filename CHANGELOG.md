@@ -1,5 +1,10 @@
 # 변경 이력
 
+## v20261009-1
+
+- Pi 개발 의존성과 현재 CI graph를 exact `1.1.0`으로 동기화했습니다. shared `@pi/presence`는 immutable `v2-20261009-1`로 고정하며, peeled commit·V2 protocol·ABI는 기존 `v2-20261004-1`과 같습니다.
+- `agent_settled.aborted`를 같은 live/startup replay fence로 전달해 기존 `cancelled` outcome으로 처리합니다. 앞선 terminal 후보가 성공이어도 취소는 completion/failure 알림을 내지 않으며, 구형 event의 terminal derivation과 standalone/companion authority는 유지합니다. OSC 7501은 Pi 자체 기능으로 유지합니다.
+
 ## v20261004-1
 
 - Shared `@pi/presence`를 immutable `v2-20261004-1`로 동기화했습니다. 기존 release와 peeled commit·V2 protocol·ABI는 같습니다.

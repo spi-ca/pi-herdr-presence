@@ -68,7 +68,7 @@ type PendingLifecycleEdge =
   | { kind: "agent_start" }
   | { kind: "turn_start"; contextPercent?: number }
   | { kind: "agent_end"; terminal?: Terminal }
-  | { kind: "agent_settled" }
+  | { kind: "agent_settled"; aborted: boolean }
   | { kind: "message_end"; usage: DerivedUsage }
   | { kind: "tool_result"; failed: boolean; todo?: DerivedTodo };
 type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean; nativePromptWaiting: boolean; nativePromptAcceptedAt: number | null };
@@ -892,28 +892,31 @@ export class PresenceRuntime {
     this.terminal = deriveTerminalState(event, this.toolFailed);
   }
 
-  handleAgentSettled(context: unknown) {
+  handleAgentSettled(context: unknown, aborted = false) {
     const fence = this.outputReady ? this.activeSessionFence(context) : undefined;
     if (!fence) {
       const pending = this.pendingSession(context);
       if (!pending) return;
       try { if (pending.context.isIdle?.() === false) return; } catch { return; }
-      this.appendPendingLifecycle(pending, { kind: "agent_settled" });
+      this.appendPendingLifecycle(pending, { kind: "agent_settled", aborted });
       return;
     }
     try {
       const idle = fence.context.isIdle;
       if (idle && idle() === false) return;
     } catch { return; }
-    this.settleActiveAgent(fence);
+    this.settleActiveAgent(fence, aborted);
   }
 
 
   /** Emit one terminal state/event pair only while the captured lifecycle still owns this session. */
-  private settleActiveAgent(fence: { epoch: number; context: ContextUsageProvider }) {
+  private settleActiveAgent(fence: { epoch: number; context: ContextUsageProvider }, aborted = false) {
     if (!this.consumerActive || !this.active || !this.isActiveSessionFence(fence)) return;
     this.activateLocalCandidates();
     if (!this.active || !this.isActiveSessionFence(fence)) return;
+    // Pi can abort tools, retry backoff, or compaction after the last agent_end.
+    // Settlement cancellation overrides that candidate only for this fenced run.
+    if (aborted) this.terminal = "cancelled";
     this.active = false;
     this.resetLongRunningTimer();
     this.updateContextUsage();
@@ -987,7 +990,7 @@ export class PresenceRuntime {
         case "agent_start": this.startActiveAgent(pending.context); break;
         case "turn_start": if (edge.contextPercent !== undefined) this.usage.setContext({ contextPercent: edge.contextPercent }); break;
         case "agent_end": this.terminal = edge.terminal ?? (this.toolFailed ? "error" : "success"); break;
-        case "agent_settled": this.settleActiveAgent(fence); break;
+        case "agent_settled": this.settleActiveAgent(fence, edge.aborted); break;
         case "message_end": this.usage.add(edge.usage); this.updateContextUsage(); this.render(); break;
         case "tool_result": this.applyDerivedTool(edge); break;
       }
