@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { join } from "node:path";
 import { createPresenceConsumer, createPresenceProducer, EVENT_NAMES, MAX_INTEGER } from "@pi/presence";
+import type { PresenceClient } from "../src/client.js";
 import { resolvePresenceConfig } from "../src/config.js";
 import { registerPresenceHooks } from "../src/hooks.js";
 import { PresenceRuntime } from "../src/runtime.js";
@@ -19,7 +20,8 @@ type Bus = {
   events: { on(name: string, listener: Listener): void; emit(name: string, payload: unknown): void };
 };
 type InternalRuntime = {
-  client: { fenceOrdinaryOutput(): void; teardown(timeoutMs: number): Promise<void> } | null;
+  client: Pick<PresenceClient, "fenceOrdinaryOutput" | "teardown" | "teardownUntil"> | null;
+  lifecycleDeadline(): number;
   consumer: ReturnType<typeof createPresenceConsumer> | null;
   consumerReady: unknown;
   consumerActive: boolean;
@@ -1059,7 +1061,13 @@ test("shutdown requires a fenced context and cleans up through a fresh valid wra
   const timeoutMs = 321;
   await withRuntime(async (runtime) => {
     const calls: number[] = [];
-    internal(runtime).client = { fenceOrdinaryOutput() {}, async teardown(timeout) { calls.push(timeout); } };
+    const deadlineAt = Date.now() + timeoutMs;
+    internal(runtime).lifecycleDeadline = () => deadlineAt;
+    internal(runtime).client = {
+      fenceOrdinaryOutput() {},
+      async teardown() { throw new Error("deadline-bound runtime cleanup must use teardownUntil"); },
+      async teardownUntil(deadline) { calls.push(deadline); },
+    };
 
     await runtime.shutdownSession({});
     expect(internal(runtime).rootSession).toBe(true);
@@ -1067,9 +1075,7 @@ test("shutdown requires a fenced context and cleans up through a fresh valid wra
 
     const manager = internal(runtime).sessionManager;
     await runtime.shutdownSession({ sessionManager: manager ?? undefined });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toBeGreaterThanOrEqual(0);
-    expect(calls[0]).toBeLessThanOrEqual(timeoutMs);
+    expect(calls).toEqual([deadlineAt]);
     expect(internal(runtime).rootSession).toBe(false);
     expect(internal(runtime).consumer).toBeNull();
   }, { ...resolvePresenceConfig(), soleReporter: true, timeoutMs });
@@ -1077,6 +1083,21 @@ test("shutdown requires a fenced context and cleans up through a fresh valid wra
 
 test("lifecycle deadlines include authority waiting while queued cleanup remains ahead of replacement", async () => {
   await withRuntime(async (runtime, _bus, requests) => {
+    const state = internal(runtime);
+    const deadlines: number[] = [];
+    const lifecycleDeadline = state.lifecycleDeadline.bind(runtime);
+    state.lifecycleDeadline = () => {
+      const deadline = lifecycleDeadline();
+      deadlines.push(deadline);
+      return deadline;
+    };
+    const cleanupDeadlines: number[] = [];
+    const client = state.client!;
+    const teardownUntil = client.teardownUntil.bind(client);
+    client.teardownUntil = async deadline => {
+      cleanupDeadlines.push(deadline);
+      await teardownUntil(deadline);
+    };
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const blocker = processCoordinator.enqueueAuthority(async () => await gate);
@@ -1090,6 +1111,8 @@ test("lifecycle deadlines include authority waiting while queued cleanup remains
       ])).resolves.toBe("settled");
       // The caller has settled, but only the reserved authority work may retire ownership.
       expect(internal(runtime).rootSession).toBe(true);
+      expect(deadlines).toHaveLength(1);
+      expect(cleanupDeadlines).toEqual([]);
 
       const replacementContext = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
       const replacement = runtime.startSession(replacementContext);
@@ -1106,6 +1129,10 @@ test("lifecycle deadlines include authority waiting while queued cleanup remains
       await blocker;
       await replacement;
       await runner;
+      // Authority-lane waiting and runtime transition must not refresh the original cleanup deadline.
+      expect(deadlines).toHaveLength(2);
+      expect(cleanupDeadlines).toEqual([deadlines[0]!]);
+      expect(cleanupDeadlines[0]).toBeLessThanOrEqual(Date.now());
       // Its budget expired while queued, so it safely closes without new remote work.
       expect(requests.slice(before).some(request => request.params.agent_session_id === "replacement")).toBe(false);
       expect(internal(runtime).rootSession).toBe(false);
