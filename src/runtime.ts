@@ -1799,11 +1799,7 @@ export class PresenceRuntime {
     if (!client) return;
     const teardownClient = async () => {
       if (deadlineAt === undefined) { await client.teardown(this.config.timeoutMs).catch(() => {}); return; }
-      // The fallback retains test-double compatibility; real clients always receive
-      // the original absolute deadline rather than a refreshed stage timeout.
-      const absolute = (client as PresenceClient & { teardownUntil?: (deadline: number) => Promise<void> }).teardownUntil;
-      if (absolute) await absolute.call(client, deadlineAt).catch(() => {});
-      else await client.teardown(this.remaining(deadlineAt)).catch(() => {});
+      await client.teardownUntil(deadlineAt).catch(() => {});
     };
     if (mode === "companion") {
       await teardownClient();

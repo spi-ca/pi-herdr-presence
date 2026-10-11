@@ -261,9 +261,15 @@ serial(
 	async () => {
 		const projections: Array<Record<string, string | null>> = [];
 		for (const config of [{ notificationPolicy: "all" as const }, { notificationPolicy: "disabled" as const }, { notifications: false }]) {
-			await withRuntime(config, async ({ producer, requests }) => {
+			await withRuntime(config, async ({ runtime, producer, requests }) => {
 				producer("interaction").publishState(input(1));
-				await eventually(() => expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true));
+				// Live input synchronously queues projection before notification.
+				// Metadata observed by the server is not a notification completion
+				// barrier. Drain admitted work, including for the two quiet policies,
+				// without teardown fencing a wrongly admitted notification away.
+				const transport = (runtime as unknown as { client: { transport: { queue: { drainPromise: Promise<void> | null } } } }).client.transport;
+				await transport.queue.drainPromise;
+				expect(metas(requests).some((request) => tokens(request).v2_interaction === "ask_user:1")).toBe(true);
 				projections.push(metas(requests).map(tokens).find((value) => value.v2_interaction === "ask_user:1")!);
 				expect(notices(requests)).toHaveLength(config.notificationPolicy === "all" ? 1 : 0);
 			});
