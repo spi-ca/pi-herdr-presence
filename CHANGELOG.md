@@ -1,5 +1,11 @@
 # 변경 이력
 
+## v20261013-1
+
+- Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.2.0`으로 갱신하고 현재 graph의 `chord`를 제거했습니다. 구버전 회귀 lane은 유지합니다.
+- Shared `@pi/presence`를 immutable `v2-20261013-1`로 동기화합니다. V2 protocol·runtime API·ABI와 기존 standalone/companion authority는 유지합니다.
+- 실제 Herdr 터미널 검증은 자동 CI와 별도의 opt-in 작업입니다.
+
 ## v20261009-1
 
 - Pi 개발 의존성과 현재 CI graph를 exact `1.1.0`으로 동기화했습니다. shared `@pi/presence`는 immutable `v2-20261009-1`로 고정하며, peeled commit·V2 protocol·ABI는 기존 `v2-20261004-1`과 같습니다.
