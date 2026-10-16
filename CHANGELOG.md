@@ -1,5 +1,9 @@
 # 변경 이력
 
+## v20261016-1
+
+- Pi 개발 의존성·lockfile·baseline CI graph를 exact `1.3.0`으로 갱신했습니다. `@pi/presence` Git pin, shared protocol과 기존 standalone/companion runtime 동작은 유지합니다.
+
 ## v20261013-1
 
 - Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.2.0`으로 갱신하고 현재 graph의 `chord`를 제거했습니다. 구버전 회귀 lane은 유지합니다.
