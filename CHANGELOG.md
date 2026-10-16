@@ -4,6 +4,10 @@
 
 - Herdr 호환성 기준을 `v0.9.5` / protocol `22`로 갱신했습니다. 설치된 `v0.9.3`–`v0.9.5`의 전체 bundled API schema가 동일함을 확인했으며, 기존 allowlist·호출 계약·managed integration asset `9`는 유지합니다. 실제 `v0.9.5` 서버/UI smoke 통과를 주장하지 않습니다.
 
+## v20261016-1
+
+- Pi 개발 의존성·lockfile·baseline CI graph를 exact `1.3.0`으로 갱신했습니다. `@pi/presence` Git pin, shared protocol과 기존 standalone/companion runtime 동작은 유지합니다.
+
 ## v20261013-1
 
 - Pi 개발 의존성·lockfile·현재 CI graph를 exact `1.2.0`으로 갱신하고 현재 graph의 `chord`를 제거했습니다. 구버전 회귀 lane은 유지합니다.
