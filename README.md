@@ -12,7 +12,7 @@ pi install -l git:github.com/spi-ca/pi-herdr-presence@v20260907-2
 
 Use an absolute checkout path for local development and run `/reload` after changing it.
 
-Compatibility baseline: Pi `1.2.0` development types and Herdr `v0.9.3` / protocol `22`; managed integration asset version `9` is unchanged. Pi's native OSC 7501 program status is separate from this extension's socket-only Herdr reporting; no duplicate terminal emitter is installed. See [coexistence and cancellation semantics](docs/event-contract.md#pi-native-program-status-coexistence).
+호환성 기준은 Pi `1.2.0` 개발 타입과 Herdr `v0.9.5` / protocol `22`입니다. `v0.9.3`–`v0.9.5`의 bundled API schema는 동일하며, managed integration asset version `9`와 기존 호출 계약은 유지합니다. 이는 실제 `v0.9.5` 서버·UI smoke 통과를 의미하지 않습니다. [검증 범위와 재현 절차](docs/development.md#herdr-095-호환성-확인)를 참고하세요. Pi's native OSC 7501 program status is separate from this extension's socket-only Herdr reporting; no duplicate terminal emitter is installed. See [coexistence and cancellation semantics](docs/event-contract.md#pi-native-program-status-coexistence).
 
 ## At a glance
 
