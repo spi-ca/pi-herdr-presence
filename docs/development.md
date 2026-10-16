@@ -31,6 +31,28 @@ Tests are intentionally layered:
 - **Integration-like Unix-socket tests** use real local Unix sockets to exercise request framing, EOF/multiple-line rejection, fingerprint validation, deadlines, queue recovery, client envelopes, runtime startup/teardown, and workspace `pane.list` eligibility. They do not require a real Herdr service.
 - **Opt-in real smoke** uses a real Herdr socket and shared live producers. It is manual only and excluded from `bun run test`, coverage, and automatic CI.
 
+## Herdr 0.9.5 호환성 확인
+
+호환성 대상은 Herdr `v0.9.5` / protocol `22`입니다. 로컬에 설치된 `0.9.3`, `0.9.4`, `0.9.5` 바이너리에서 `api schema --json`을 추출하고 `jq -S`로 정규화한 결과, 세 버전의 전체 schema SHA-256은 모두 다음과 같았습니다.
+
+```text
+9e2af207e9aa8183d4aeca5fde9cc48e7909bb40cdbd7cf21608a6d3ea78075b
+```
+
+mise에 각 버전과 jq가 설치된 환경에서 다음과 같이 재현할 수 있습니다. 파이프 중간 실패를 놓치지 않도록 Bash의 `pipefail`을 사용합니다.
+
+```bash
+set -euo pipefail
+for version in 0.9.3 0.9.4 0.9.5; do
+  echo "Herdr $version"
+  mise exec "herdr@$version" -- herdr api schema --json | jq -S . | sha256sum
+done
+```
+
+`PaneInfo`의 필수 필드·선택 필드도 기존 validator와 일치하므로 allowlist를 넓히거나 새 protocol을 허용하지 않습니다. managed integration asset `9`, standalone/companion authority, metadata와 workspace lease 계약, `resume_argv` 미전송 정책은 유지합니다. 과거 버전으로 고정된 resume 안전성 설계의 근거 링크는 역사적 조사 자료로 유지합니다.
+
+이 비교는 **바이너리에 포함된 API 계약 확인**이지 실행 중인 서버의 버전이나 실제 UI 동작 확인이 아닙니다. 설치·mise 기본 선택이 `0.9.5`여도 기존 서버와 현재 셸의 PATH는 `0.9.4`일 수 있습니다. `mise exec herdr@0.9.5 -- herdr --version`으로 바이너리를, 같은 실행 접두사의 `herdr status server`로 서버 버전을 별도로 확인하세요. 업데이트만으로 기존 서버가 교체됐다고 간주하지 않습니다. 실제 `0.9.5` standalone/companion 동작은 아래의 별도 opt-in 검증 범위이며, 서버 재시작·handoff는 사용자 승인 없이 수행하지 않습니다. 아래 harness는 standalone만 검증합니다.
+
 ## Manual real-Herdr smoke
 
 Use only a disposable standalone pane. In its configured workspace, the current `HERDR_PANE_ID` must be the sole `agent: "pi"` pane in Herdr's complete `pane.list` response; non-Pi panes may exist, but another Pi pane makes the workspace lease ineligible. Before any real relay, effective notifications must be disabled; set `PI_HERDR_PRESENCE_NOTIFICATIONS=false` (preferred) or `PI_HERDR_PRESENCE_NOTIFY_POLICY=disabled`. The harness refuses to run unless the guard is exactly `PI_HERDR_LIVE_SMOKE=disposable-standalone-pane`, `PI_HERDR_PRESENCE_METADATA=true`, notifications are effectively disabled, `PI_HERDR_PRESENCE_FINAL_CLEAR_MS` is at least `1000`, the managed marker is exactly absent, and the effective configuration selects standalone. It remains a disposable standalone/manual check: it is not a service, test fixture, or CI job.
