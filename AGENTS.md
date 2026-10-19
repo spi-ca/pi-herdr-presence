@@ -1,6 +1,6 @@
 # pi-herdr-presence
 
-`pi-herdr-presence` is a Bun Pi extension reporting TUI-only local presence through Herdr's supplied Unix socket. Use `bun@1.3.14`; run `bun run ci` before handoff.
+`pi-herdr-presence` is a Bun Pi extension reporting TUI-only local presence through Herdr's supplied Unix socket. Use the latest stable Bun (minimum `1.4.2`); see `docs/development.md` for toolchain policy and run `bun run ci` before handoff.
 
 Core invariants: require `HERDR_ENV=1`, absolute `HERDR_SOCKET_PATH`, explicit opaque `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`; never execute a process/CLI/shell or open a Herdr subscription/stream (while subscribing to Pi lifecycle and shared V2 events); use one request per connection; validate identity, protocol, and socket paths strictly; keep failures output-only. The only recurring timer is the bounded workspace-summary lease.
 

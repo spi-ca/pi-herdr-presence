@@ -226,7 +226,7 @@ serial(
 			await eventually(() =>
 				expect(reports(requests).at(-1)?.params).toMatchObject({
 					state: "blocked",
-					message: "Pi needs your input",
+					message: "Pi · ? Waiting for input",
 				}),
 			);
 			expect(metas(requests).some((request) => tokens(request).v2_attention === "input_required:new" && tokens(request).v2_interaction === "ask_user:1")).toBe(true);
@@ -328,7 +328,7 @@ serial(
 			expect(
 				reports(requests).at(-1)?.params,
 			).toMatchObject({
-				message: "Pi needs your input",
+				message: "Pi · ? Waiting for input",
 			});
 			s.withdraw({
 				version: 2,
@@ -340,7 +340,7 @@ serial(
 				expect(
 					reports(requests).at(-1)?.params,
 				).toMatchObject({
-					message: "Pi needs your input",
+					message: "Pi · ? Waiting for input",
 				}),
 			);
 		}),
@@ -353,9 +353,9 @@ serial(
 			producer("subagent").publishState(failure(1));
 			runtime.handleUiPromptStart(context);
 			runtime.handleUiPromptEnd(context);
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]);
 			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
 			expect("inputNotificationTimer" in (runtime as object)).toBe(false);
 		}),
@@ -368,7 +368,7 @@ serial(
 			runtime.handleUiPromptStart(context);
 			producer("subagent").publishState(failure(1));
 			runtime.handleUiPromptEnd(context);
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
 		}),
 );
 serial(
@@ -377,13 +377,13 @@ serial(
 		withRuntime({}, async ({ runtime, producer, requests }) => {
 			const context = (runtime as unknown as { context: object }).context;
 			runtime.handleUiPromptStart(context);
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input"]));
 			await sleep(30);
 			runtime.handleUiPromptEnd(context);
 			producer("subagent").publishState(failure(1));
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]);
 		}),
 );
 serial(
@@ -394,9 +394,9 @@ serial(
 			producer("subagent").publishState(failure(1));
 			interaction.publishState(input(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]);
 		}),
 );
 serial(
@@ -407,9 +407,9 @@ serial(
 			interaction.publishState(input(1));
 			producer("subagent").publishState(failure(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]);
 		}),
 );
 serial(
@@ -418,13 +418,13 @@ serial(
 		withRuntime({}, async ({ producer, requests }) => {
 			const interaction = producer("interaction");
 			interaction.publishState(input(1));
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input"]));
 			await sleep(30);
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
 			producer("subagent").publishState(failure(1));
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]);
 		}),
 );
 serial(
@@ -438,7 +438,7 @@ serial(
 			await sleep(20);
 			subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]));
 		}),
 );
 serial(
@@ -450,8 +450,8 @@ serial(
 			runtime.handleUiPromptStart((runtime as unknown as { context: object }).context);
 			await sleep(100);
 			expect(notices(requests).map((request) => request.params?.title)).toEqual([
-				"Pi needs attention",
-				"Pi needs your input",
+				"Pi · ✗ Failed",
+				"Pi · ? Waiting for input",
 			]);
 		}),
 );
@@ -465,7 +465,7 @@ serial(
 			subagent.withdraw({ version: 2, generation: 1, sequence: 2, source: "subagent" });
 			await sleep(100);
 			expect(notices(requests).map((request) => request.params?.title)).toEqual([
-				"Pi needs your input",
+				"Pi · ? Waiting for input",
 			]);
 		}),
 );
@@ -480,7 +480,7 @@ serial(
 			interaction.publishState(input(1));
 			producer("subagent").publishState(failure(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
 		}),
 );
 serial(
@@ -489,16 +489,16 @@ serial(
 		withRuntime({}, async ({ runtime, producer, requests }) => {
 			const interaction = producer("interaction");
 			interaction.publishState(input(1));
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input"]));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
 			const rate = (runtime as unknown as { notificationRate: { accept(kind: "other"): boolean } }).notificationRate;
 			for (let index = 0; index < 8; index += 1) expect(rate.accept("other")).toBe(true);
 			interaction.publishState(input(1, 2));
 			producer("subagent").publishState(failure(1));
 			interaction.withdraw({ version: 2, generation: 2, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]));
 			await sleep(30);
-			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs your input", "Pi needs attention"]);
+			expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]);
 			expect((runtime as unknown as { failureArrivals: unknown[] }).failureArrivals).toEqual([]);
 		}),
 );
@@ -538,7 +538,7 @@ serial(
 			interaction.publishState(input(1));
 			producer("subagent").publishState(failure(1));
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
 		}),
 );
 serial(
@@ -583,8 +583,8 @@ serial(
 			runtime.handleUiPromptEnd(client.context);
 			await Promise.resolve();
 			releaseFingerprint();
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
-			expect(notices(requests).some((request) => request.params?.title === "Pi needs your input")).toBe(false);
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
+			expect(notices(requests).some((request) => request.params?.title === "Pi · ? Waiting for input")).toBe(false);
 			const beforeRecovery = requests.filter((request) => request.method === "pane.report_agent").length;
 			runtime.handleAgentStart(client.context);
 			await eventually(() => expect(requests.filter((request) => request.method === "pane.report_agent").length).toBeGreaterThan(beforeRecovery));
@@ -626,8 +626,8 @@ serial(
 			internal.render = render;
 			runtime.handleUiPromptEnd(internal.context);
 			releaseFingerprint();
-			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi needs attention"]));
-			expect(notices(requests).some((request) => request.params?.title === "Pi needs your input")).toBe(false);
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ✗ Failed"]));
+			expect(notices(requests).some((request) => request.params?.title === "Pi · ? Waiting for input")).toBe(false);
 		}),
 );
 serial(
@@ -651,7 +651,7 @@ serial(
 				}
 				return { dev: 1, ino: 1, uid: 1 };
 			};
-			expect(internal.notify("error", "replacement-key", "Pi needs attention", "old", "local")).toBe(true);
+			expect(internal.notify("error", "replacement-key", "Pi · ✗ Failed", "old", "local")).toBe(true);
 			await fingerprintSeen;
 			const replacementContext = { mode: "tui", sessionManager: { getSessionId: () => "replacement" } };
 			const replacing = runtime.startSession(replacementContext);
@@ -659,7 +659,7 @@ serial(
 			await replacing;
 			// The released old reservation is stale. A same-key notification in the
 			// replacement must have a fresh policy reservation and reach the socket.
-			expect(internal.notify("error", "replacement-key", "Pi needs attention", "new", "local")).toBe(true);
+			expect(internal.notify("error", "replacement-key", "Pi · ✗ Failed", "new", "local")).toBe(true);
 			await eventually(() => expect(notices(requests)).toHaveLength(1));
 		}),
 );

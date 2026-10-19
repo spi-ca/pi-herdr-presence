@@ -44,7 +44,7 @@ test("report_agent_session and report project an ID-only session reference", asy
   const presence = client(fake.transport);
 
   await presence.reportSession(session, "session restored");
-  await presence.report("working", session, "Pi is working");
+  await presence.report("working", session, "Pi · ▶ Running");
 
   expect(fake.requests).toHaveLength(2);
   for (const request of fake.requests) {
@@ -52,7 +52,7 @@ test("report_agent_session and report project an ID-only session reference", asy
     expect(request.params).not.toHaveProperty("agent_session_path");
   }
   expect(fake.requests[0]).toMatchObject({ method: "pane.report_agent_session", params: { session_start_source: "session restored" } });
-  expect(fake.requests[1]).toMatchObject({ method: "pane.report_agent", params: { state: "working", message: "Pi is working" } });
+  expect(fake.requests[1]).toMatchObject({ method: "pane.report_agent", params: { state: "working", message: "Pi · ▶ Running" } });
 });
 
 test("client allocator is process-monotonic across replacement clients and wall-clock regression", async () => {
@@ -127,7 +127,7 @@ test("a failed legacy migration is one bounded attempt and does not block normal
   });
 
   await presence.metadata(presentation(), idleTokens);
-  await presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
+  await presence.notify("Pi · ✗ Failed", "A Pi task failed", { actionable: true, sound: "request" });
 
   expect(requests.map((request) => request.method)).toEqual(["pane.report_metadata", "pane.report_metadata", "pane.report_metadata", "notification.show"]);
   expectExactMetadataClear(requests[0]!.params);
@@ -189,7 +189,7 @@ test("companion owns fixed presentation metadata without managed authority calls
   const presence = client(fake.transport, 100, "companion");
   await presence.prepareSessionAuthority();
   await presence.reportSession(session);
-  await presence.report("working", session, "Pi is working");
+  await presence.report("working", session, "Pi · ▶ Running");
   await presence.metadata(presentation(), idleTokens);
   await presence.teardown();
 
@@ -257,7 +257,7 @@ test("invalid sequence clocks make fire-and-forget lifecycle output fail closed 
       void presence.metadata(presentation(), nullTokens);
       void presence.clearLegacyMetadata();
       void presence.clearMetadata();
-      void presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
+      void presence.notify("Pi · ✗ Failed", "A Pi task failed", { actionable: true, sound: "request" });
       void presence.teardown();
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(fake.requests.map(request => request.method)).toEqual(["notification.show"]);
@@ -528,8 +528,8 @@ test("ordinary reports and metadata cache only acknowledged wire-equivalent proj
   const fake = recordingTransport();
   const presence = client(fake.transport);
 
-  await presence.report("working", session, "Pi is working");
-  await presence.report("working", session, "Pi is working");
+  await presence.report("working", session, "Pi · ▶ Running");
+  await presence.report("working", session, "Pi · ▶ Running");
   await presence.metadata(presentation(), idleTokens);
   await presence.metadata(presentation(), { ...idleTokens, summary: "working" });
   await presence.metadata(presentation(), { ...idleTokens, summary: "working" });
@@ -627,7 +627,7 @@ test("notification response failures are contained without retrying or unhandled
         async close() {},
       });
 
-      expect(presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" })).toBe(true);
+      expect(presence.notify("Pi · ✗ Failed", "A Pi task failed", { actionable: true, sound: "request" })).toBe(true);
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({ method: "notification.show" });
@@ -651,7 +651,7 @@ test("fencing synchronously cancels outstanding notification keys", async () => 
     async close() {},
   });
 
-  expect(presence.notify("Pi needs your input", "Pi needs your input", { actionable: true, sound: "request" }, "input:1")).toBe(true);
+  expect(presence.notify("Pi · ? Waiting for input", "Pi · ? Waiting for input", { actionable: true, sound: "request" }, "input:1")).toBe(true);
   presence.fenceOrdinaryOutput();
   expect(cancelled).toContain("notification:input:1");
   settle();
@@ -670,8 +670,8 @@ test("actionable queue residency clamp honors one- and thirty-second boundaries"
     cancel(_key: string) {},
     async close() {},
   };
-  client(transport, 1).notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
-  client(transport, 5_000, "standalone", 16).notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
+  client(transport, 1).notify("Pi · ✗ Failed", "A Pi task failed", { actionable: true, sound: "request" });
+  client(transport, 5_000, "standalone", 16).notify("Pi · ✗ Failed", "A Pi task failed", { actionable: true, sound: "request" });
   expect(deadlines[0]).toBeGreaterThanOrEqual(999);
   expect(deadlines[0]).toBeLessThanOrEqual(1_001);
   expect(deadlines[1]).toBeGreaterThanOrEqual(29_999);
@@ -694,14 +694,14 @@ test("client separates notification queue lanes from sounds", async () => {
     async close() {},
   };
   const presence = client(transport);
-  await presence.notify("Pi needs attention", "A Pi task needs attention", { actionable: true, sound: "request" });
-  await presence.notify("Pi activity completed", "Pi activity completed", { actionable: false, sound: "done" });
-  await presence.notify("Pi is still working", "A Pi task is taking longer than expected", { actionable: false, sound: "none" });
+  await presence.notify("Pi · ✗ Failed", "A Pi task failed", { actionable: true, sound: "request" });
+  await presence.notify("Pi · ✓ Completed", "Pi · ✓ Completed", { actionable: false, sound: "done" });
+  await presence.notify("Pi · ▶ Still running", "A Pi task is taking longer than expected", { actionable: false, sound: "none" });
 
   expect(requests).toHaveLength(3);
-  expect(requests[0]).toMatchObject({ method: "notification.show", params: { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" } });
-  expect(requests[1]).toMatchObject({ method: "notification.show", params: { title: "Pi activity completed", body: "Pi activity completed", sound: "done" } });
-  expect(requests[2]).toMatchObject({ method: "notification.show", params: { title: "Pi is still working", body: "A Pi task is taking longer than expected", sound: "none" } });
+  expect(requests[0]).toMatchObject({ method: "notification.show", params: { title: "Pi · ✗ Failed", body: "A Pi task failed", sound: "request" } });
+  expect(requests[1]).toMatchObject({ method: "notification.show", params: { title: "Pi · ✓ Completed", body: "Pi · ✓ Completed", sound: "done" } });
+  expect(requests[2]).toMatchObject({ method: "notification.show", params: { title: "Pi · ▶ Still running", body: "A Pi task is taking longer than expected", sound: "none" } });
   expect(lanes).toEqual(["actionable", "replaceable", "replaceable"]);
   // timeout=100 and maxQueue=16 derive 1700ms, clamped independently of the fresh socket timeout.
   expect(residencyDeadlines[0]).toBeGreaterThanOrEqual(Date.now() + 1_600);

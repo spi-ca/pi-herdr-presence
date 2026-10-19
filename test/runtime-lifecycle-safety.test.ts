@@ -141,10 +141,10 @@ test("native-only prompts project fixed working-to-blocked-to-working-to-idle st
     expect((runtime as unknown as { nativePromptEpoch: number | null }).nativePromptEpoch).toBeNull();
     runtime.handleAgentStart(context);
     await pause();
-    expect(reports().at(-1)).toMatchObject({ state: "working", message: "Pi is working" });
+    expect(reports().at(-1)).toMatchObject({ state: "working", message: "Pi · ▶ Running" });
     bus.hooks.get("ui_prompt_start")?.[0]?.({ title: "private prompt", content: "secret answer" }, context);
     await pause();
-    expect(reports().at(-1)).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+    expect(reports().at(-1)).toMatchObject({ state: "blocked", message: "Pi · ? Waiting for input" });
     const nativeMetadata = requests.find(request => request.method === "pane.report_metadata" && (request.params.tokens as Record<string, unknown>).summary === "input");
     expect(nativeMetadata).toBeDefined();
     expectExactMetadataIngress(nativeMetadata!.params);
@@ -152,17 +152,17 @@ test("native-only prompts project fixed working-to-blocked-to-working-to-idle st
     expect(JSON.stringify(requests)).not.toContain("private prompt");
     expect(JSON.stringify(requests)).not.toContain("secret answer");
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
-      expect.objectContaining({ title: "Pi needs your input", body: "Pi needs your input" }),
+      expect.objectContaining({ title: "Pi · ? Waiting for input", body: "Pi · ? Waiting for input" }),
     ]);
 
     bus.hooks.get("ui_prompt_end")?.[0]?.({ title: "private prompt" }, context);
     await pause();
-    expect(reports().at(-1)).toMatchObject({ state: "working", message: "Pi is working" });
+    expect(reports().at(-1)).toMatchObject({ state: "working", message: "Pi · ▶ Running" });
 
     runtime.handleAgentSettled(context);
     await pause();
-    expect(reports().at(-1)).toMatchObject({ state: "idle", message: "Pi is idle" });
-    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi needs your input")).toHaveLength(1);
+    expect(reports().at(-1)).toMatchObject({ state: "idle", message: "Pi · ○ Idle" });
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi · ? Waiting for input")).toHaveLength(1);
   }, { ...resolvePresenceConfig(), soleReporter: true, notificationPolicy: "all" });
 });
 
@@ -177,12 +177,12 @@ test("native then V2 input overlap remains blocked until both sources end and no
       await pause();
       runtime.handleUiPromptEnd(context);
       await pause();
-      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi · ? Waiting for input" });
       expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
 
       expect(interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" })).toBe(true);
       await pause();
-      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "idle", message: "Pi is idle" });
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "idle", message: "Pi · ○ Idle" });
     } finally {
       interaction.deactivate();
     }
@@ -200,14 +200,14 @@ test("V2 then native input overlap notifies once and remains blocked until both 
       runtime.handleUiPromptStart(context);
       await pause();
       expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1);
-      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi · ? Waiting for input" });
 
       expect(interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" })).toBe(true);
       await pause();
-      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi needs your input" });
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "blocked", message: "Pi · ? Waiting for input" });
       runtime.handleUiPromptEnd(context);
       await pause();
-      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "idle", message: "Pi is idle" });
+      expect(agentRequests(requests).at(-1)?.params).toMatchObject({ state: "idle", message: "Pi · ○ Idle" });
     } finally {
       interaction.deactivate();
     }
@@ -351,7 +351,7 @@ test("runtime keeps safe pane messages separate from presentation and ten-token 
     expectExactMetadataClear(metadata[0]!.params);
     expectExactLegacyMetadataClear(metadata[1]!.params);
     for (const request of metadata.slice(2)) expectExactMetadataIngress(request.params);
-    expect(agentRequests(requests).some((request) => request.params.message === "Pi is idle")).toBe(true);
+    expect(agentRequests(requests).some((request) => request.params.message === "Pi · ○ Idle")).toBe(true);
   });
 });
 
@@ -363,7 +363,7 @@ test("a valid waiting plus blocked V2 fixture projects fixed blocked pane presen
       expect(producer.publishState({ version: 2, generation: 1, sequence: 1, source: "subagent", state: "waiting", attention: { reason: "blocked", occurrence: "new" } })).toBe(true);
       await pause();
       const report = agentRequests(requests).at(-1);
-      expect(report?.params).toMatchObject({ state: "blocked", message: "Pi needs attention" });
+      expect(report?.params).toMatchObject({ state: "blocked", message: "Pi · ! Blocked" });
       const ingress = requests.filter((request) => request.method === "pane.report_metadata" && "title" in request.params).at(-1);
       expect(ingress).toBeDefined();
       if (!ingress) throw new Error("missing metadata ingress");
@@ -799,8 +799,8 @@ test("gated startup retains post-activation live input, paired failure, terminal
     // errors-only policy's pane projection but does not create a static toast.
     const notices = requests.filter((request) => request.method === "notification.show");
     expect(notices.map((request) => request.params)).toEqual([
-      { title: "Pi needs your input", body: "Pi needs your input", sound: "request" },
-      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
+      { title: "Pi · ? Waiting for input", body: "Pi · ? Waiting for input", sound: "request" },
+      { title: "Pi · ✗ Failed", body: "A Pi task failed", sound: "request" },
     ]);
     const terminalTokens = requests
       .filter((request) => request.method === "pane.report_metadata")

@@ -15,7 +15,7 @@ export function expectExactMetadataIngress(params: unknown): void {
   expect(metadata.seq).toEqual(expect.any(Number));
   expect(metadata.title).toBe(`Pi · ${metadata.tokens.summary}`);
   expect(metadata.display_agent).toBe("Pi");
-  expect(metadata.state_labels).toEqual({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" });
+  expect(metadata.state_labels).toEqual({ idle: "Pi · ○ Idle", working: "Pi · ▶ Running", blocked: "Pi · ! Needs attention", unknown: "Pi · ? Unknown" });
   expect(Object.keys(metadata.tokens)).toEqual([...HERDR_METADATA_TOKEN_KEYS]);
 }
 
@@ -34,7 +34,7 @@ export function expectExactCompanionMetadataIngress(params: unknown): void {
   expect(metadata.seq).toEqual(expect.any(Number));
   expect(metadata.title).toBe(`Pi · ${metadata.tokens.summary}`);
   expect(metadata.display_agent).toBe("Pi");
-  expect(metadata.state_labels).toEqual({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" });
+  expect(metadata.state_labels).toEqual({ idle: "Pi · ○ Idle", working: "Pi · ▶ Running", blocked: "Pi · ! Needs attention", unknown: "Pi · ? Unknown" });
   expect(Object.keys(metadata.tokens)).toEqual([...HERDR_METADATA_TOKEN_KEYS]);
 }
 

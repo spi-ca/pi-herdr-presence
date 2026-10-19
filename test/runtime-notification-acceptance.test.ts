@@ -66,7 +66,7 @@ test("an actionable terminal notification evicts queued replaceable metadata beh
     releaseReport();
     await eventually(() => expect(requests.map(request => request.method)).toEqual(["pane.report_agent", "notification.show"]));
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
-      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
+      { title: "Pi · ✗ Failed", body: "A Pi task failed", sound: "request" },
     ]);
   } finally {
     releaseReport?.();
@@ -111,7 +111,7 @@ test("companion emits a policy-eligible static notification with exact presentat
     await eventually(() => expect(requests.filter(request => request.method === "notification.show")).toHaveLength(1));
 
     const notices = requests.filter(request => request.method === "notification.show");
-    expect(notices.map(request => request.params)).toEqual([{ title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" }]);
+    expect(notices.map(request => request.params)).toEqual([{ title: "Pi · ✗ Failed", body: "A Pi task failed", sound: "request" }]);
     const metadata = requests.filter(request => request.method === "pane.report_metadata");
     expect(metadata).not.toHaveLength(0);
     // The terminal's actionable notification preempts the observer-only eligibility read.
@@ -124,7 +124,7 @@ test("companion emits a policy-eligible static notification with exact presentat
         expect(request.params).not.toHaveProperty(field);
       }
       if (isExactCompanionMetadataParams(request.params)) {
-        expect(request.params).toMatchObject({ title: `Pi · ${(request.params.tokens as Record<string, unknown>).summary}`, display_agent: "Pi", state_labels: { idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" } });
+        expect(request.params).toMatchObject({ title: `Pi · ${(request.params.tokens as Record<string, unknown>).summary}`, display_agent: "Pi", state_labels: { idle: "Pi · ○ Idle", working: "Pi · ▶ Running", blocked: "Pi · ! Needs attention", unknown: "Pi · ? Unknown" } });
       } else {
         expect(request.params).toMatchObject({ clear_title: true, clear_display_agent: true, clear_state_labels: true });
       }
@@ -175,9 +175,9 @@ test("V2 live terminal failure, blocked attention, and input each deliver one bo
     await eventually(() => expect(requests.filter(request => request.method === "notification.show")).toHaveLength(3));
     const notices = requests.filter(request => request.method === "notification.show");
     expect(notices.map(request => request.params)).toEqual([
-      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
-      { title: "Pi needs attention", body: "A Pi task needs attention", sound: "request" },
-      { title: "Pi needs your input", body: "Pi needs your input", sound: "request" },
+      { title: "Pi · ✗ Failed", body: "A Pi task failed", sound: "request" },
+      { title: "Pi · ! Blocked", body: "A Pi task is blocked", sound: "request" },
+      { title: "Pi · ? Waiting for input", body: "Pi · ? Waiting for input", sound: "request" },
     ]);
     expect(JSON.stringify(notices)).not.toContain("private");
     subagent.deactivate();

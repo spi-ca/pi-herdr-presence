@@ -497,13 +497,13 @@ serial(
 			clock.advance(10);
 			runtime.handleUiPromptStart(context);
 			clock.advance(100);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 			runtime.handleUiPromptEnd(context);
 			clock.advance(19);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 			clock.advance(1);
-			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working").map(request => request.params)).toEqual([
-				{ title: "Pi is still working", body: "A Pi task is taking longer than expected", sound: "none" },
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running").map(request => request.params)).toEqual([
+				{ title: "Pi · ▶ Still running", body: "A Pi task is taking longer than expected", sound: "none" },
 			]));
 		}, clock);
 	},
@@ -529,10 +529,10 @@ serial(
 			interaction.publishState(input(1));
 			runtime.handleUiPromptEnd(context);
 			clock.advance(100);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
 			clock.advance(20);
-			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(1));
 		}, clock);
 	},
 );
@@ -545,9 +545,9 @@ serial(
 			runtime.handleAgentStart(context);
 			clock.elapse(20);
 			runtime.handleUiPromptStart(context);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 			runtime.handleUiPromptEnd(context);
-			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(1));
 		}, clock);
 	},
 );
@@ -561,10 +561,10 @@ serial(
 			{ notificationPolicy: "background", longRunningMs: 20 },
 			async ({ requests }) => {
 				clock.advance(100);
-				expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+				expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 				subagent.publishState({ version: 2, generation: 1, sequence: 2, source: "subagent", state: "running" });
 				clock.advance(20);
-				await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+				await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(1));
 			},
 			clock,
 			({ producer }) => {
@@ -596,9 +596,9 @@ serial(
 			expect(internal.longRunningTimer).not.toBeUndefined();
 			expect(internal.terminalRecords).toHaveLength(0);
 			clock.advance(9);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 			clock.advance(1);
-			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(1));
 			runtime.handleAgentSettled({ ...(context as object), isIdle: () => true });
 			expect(internal.terminalRecords).toHaveLength(1);
 			expect(internal.longRunningRemaining).toBeNull();
@@ -624,7 +624,7 @@ serial(
 			expect(internal.longRunningRemaining).toBeNull();
 			expect(internal.longRunningTimer).toBeUndefined();
 			clock.advance(100);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 
 			runtime.handleAgentStart(replacement);
 			expect(internal.longRunningRemaining).toBe(20);
@@ -632,7 +632,7 @@ serial(
 			expect(internal.longRunningRemaining).toBeNull();
 			expect(internal.longRunningTimer).toBeUndefined();
 			clock.advance(100);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 		}, clock);
 	},
 );
@@ -657,9 +657,9 @@ serial(
 			expect(internal.terminalRecords).toHaveLength(1);
 			expect(internal.longRunningRemaining).toBe(20);
 			clock.advance(19);
-			expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(0);
+			expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(0);
 			clock.advance(1);
-			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi is still working")).toHaveLength(1));
+			await eventually(() => expect(notices(requests).filter(request => request.params?.title === "Pi · ▶ Still running")).toHaveLength(1));
 			runtime.handleAgentEnd({}, context);
 			runtime.handleAgentSettled({ ...(context as object), isIdle: () => true });
 			expect(internal.terminalRecords).toHaveLength(2);

@@ -231,9 +231,9 @@ serial("a pending native prompt is adopted after delayed TUI startup with one fi
     expect((runtime as unknown as { pendingLifecycle: { nativePromptWaiting: boolean } | null }).pendingLifecycle?.nativePromptWaiting).toBe(true);
     await starting;
     await pause();
-    expect(requests.some(request => request.method === "pane.report_agent" && request.params.state === "blocked" && request.params.message === "Pi needs your input")).toBe(true);
+    expect(requests.some(request => request.method === "pane.report_agent" && request.params.state === "blocked" && request.params.message === "Pi · ? Waiting for input")).toBe(true);
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params)).toEqual([
-      expect.objectContaining({ title: "Pi needs your input", body: "Pi needs your input" }),
+      expect.objectContaining({ title: "Pi · ? Waiting for input", body: "Pi · ? Waiting for input" }),
     ]);
   } finally {
     await runtime.shutdownSession(sessionContext);
@@ -377,10 +377,10 @@ serial("a pending agent end during stalled startup preserves the active long-run
     expect(internal.longRunningArmedAt).toBe(0);
     expect(internal.terminalRecords).toHaveLength(0);
     clock.advance(19);
-    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi is still working")).toHaveLength(0);
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi · ▶ Still running")).toHaveLength(0);
     clock.advance(1);
     await pause();
-    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi is still working")).toHaveLength(1);
+    expect(requests.filter(request => request.method === "notification.show" && request.params.title === "Pi · ▶ Still running")).toHaveLength(1);
     runtime.handleAgentSettled({ ...context, isIdle: () => true });
     expect(internal.terminalRecords).toHaveLength(1);
     expect(internal.longRunningTimer).toBeUndefined();
@@ -554,7 +554,7 @@ serial("startup projections reach a fixed point before terminal retention and no
     expect(reports).toBe(2);
     const terminalMetadataIndex = requests.findIndex(request => request.method === "pane.report_metadata"
       && (request.params.tokens as Record<string, string | null>).v2_terminals === "subagent:1:1:completed");
-    const notificationIndex = requests.findIndex(request => request.method === "notification.show" && request.params.title === "Pi activity completed");
+    const notificationIndex = requests.findIndex(request => request.method === "notification.show" && request.params.title === "Pi · ✓ Completed");
     expect(terminalMetadataIndex).toBeGreaterThan(-1);
     expect(notificationIndex).toBeGreaterThan(terminalMetadataIndex);
   } finally {
@@ -642,8 +642,8 @@ serial("startup notification drain preserves external candidate arrival order", 
     await pause(100);
 
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual([
-      "Pi needs attention",
-      "Pi activity completed",
+      "Pi · ! Blocked",
+      "Pi · ✓ Completed",
     ]);
   } finally {
     releaseReport?.();
@@ -698,8 +698,8 @@ serial("startup native failure/input ordering remains bounded at maxQueue=1", as
     // The native input suppresses only its nearby state failure. The distinct
     // failed terminal remains independently eligible under the smallest queue.
     expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual([
-      "Pi needs your input",
-      "Pi needs attention",
+      "Pi · ? Waiting for input",
+      "Pi · ✗ Failed",
     ]);
   } finally {
     releaseReport?.();
@@ -745,7 +745,7 @@ serial("startup pre-dispatch input withdrawal cancels its stale alert and releas
     await starting;
     await pause(30);
 
-    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs attention"]);
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi · ✗ Failed"]);
     expect((runtime as unknown as { failureArrivals: unknown[]; inputLifecycles: unknown[] }).failureArrivals).toEqual([]);
     expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
   } finally {
@@ -801,7 +801,7 @@ serial("startup rejected input lifecycle does not inherit an older admitted rece
 
     // Both short prompts ended while their input requests were still queued;
     // neither stale toast reaches the socket, and the nearby failure stays live.
-    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi needs attention"]);
+    expect(requests.filter(request => request.method === "notification.show").map(request => request.params.title)).toEqual(["Pi · ✗ Failed"]);
     expect((runtime as unknown as { failureArrivals: unknown[]; inputLifecycles: unknown[] }).failureArrivals).toEqual([]);
     expect((runtime as unknown as { inputLifecycles: unknown[] }).inputLifecycles).toEqual([]);
   } finally {
