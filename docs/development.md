@@ -1,6 +1,6 @@
 # Development and verification
 
-Use `bun@1.3.14`.
+Use the latest stable Bun, with a minimum supported version of `1.4.2` (`engines.bun: ">=1.4.2"`). There is no fixed `packageManager` pin. The Bun runtime policy is separate from the pinned Pi development graph and `bun-types` dependency.
 
 ```bash
 bun install --frozen-lockfile
@@ -83,12 +83,12 @@ Same-JavaScript-realm extensions are trusted arbitrary code. The process coordin
 
 ## Automatic CI compatibility matrix
 
-Push and pull-request CI runs `bun run ci`, `bun pm pack --dry-run`, and a provider-free tarball smoke. The smoke installs the tarball in an isolated temporary consumer with lifecycle scripts disabled, injects exact Pi runtime peers, imports it, and invokes only a registration stub; it removes `KIRO_API_KEY`, sets `PI_OFFLINE=1`, and never invokes the real-Herdr smoke harness. Both lanes log the selected Bun version and the path and version of `cc`.
+Push and pull-request CI runs `bun run ci`, `bun pm pack --dry-run`, and a provider-free tarball smoke. The smoke installs the tarball in an isolated temporary consumer with lifecycle scripts disabled, injects exact Pi runtime peers, imports it, and invokes only a registration stub; it removes `KIRO_API_KEY`, sets `PI_OFFLINE=1`, and never invokes the real-Herdr smoke harness. Both lanes use `oven-sh/setup-bun` with `bun-version: latest` (latest stable), assert that the installed version matches `steps.setup_bun.outputs.bun-version`, and enforce `>=1.4.2` with `Bun.semver`. Both lanes log the selected Bun version and the path and version of `cc`.
 
 | Lane | Bun | Pi development graph | Install |
 | --- | --- | --- | --- |
-| locked baseline | 1.3.14 (`packageManager`) | `pi-coding-agent` exact 1.3.0 lockfile graph | `bun install --frozen-lockfile` |
-| older compatibility | 1.4.2 | the declared Pi devDependency selected exactly at 0.85.1 in an ephemeral graph | `bun install --no-save` |
+| locked baseline | latest stable (>=1.4.2) | `pi-coding-agent` exact 1.3.0 lockfile graph | `bun install --frozen-lockfile` |
+| older compatibility | latest stable (>=1.4.2) | the declared Pi devDependency selected exactly at 0.85.1 in an ephemeral graph | `bun install --no-save` |
 
 Each lane's repository-install graph verifier recursively inspects hoisted links and Bun `.bun` nested symlinks against the selected exact stack mapping: `1.3.0` for the locked baseline and `0.85.1` for older compatibility. Every package in that selected mapping must be installed at its exact version. Separately, the tarball smoke deliberately injects the complete selected exact Pi graph and declared non-Pi peers into its isolated consumer as a deterministic compatibility harness against wildcard or transitive drift; it is not a minimal-peer-install proof. The older compatibility lane does not allow the `*` peer range to choose a latest package: it temporarily selects every declared Pi development package at exact `0.85.1`, restores the manifest, and confirms that the lockfile is unchanged. This is the hosted-CI configuration; it is not evidence of a local reinstall or a live-Herdr/provider check.
 
