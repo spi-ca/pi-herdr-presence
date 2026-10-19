@@ -21,7 +21,7 @@ export const titleForSummary = (summary: string | null): string => `Pi · ${summ
 /** Display agent and state labels are fixed; no runtime context reaches them. */
 export const HERDR_FIXED_PRESENTATION: HerdrPresentation = Object.freeze({
  displayAgent: "Pi",
- labels: Object.freeze({ idle: "Pi is idle", working: "Pi is working", blocked: "Pi needs attention", unknown: "Pi state unknown" }),
+ labels: Object.freeze({ idle: "Pi · ○ Idle", working: "Pi · ▶ Running", blocked: "Pi · ! Needs attention", unknown: "Pi · ? Unknown" }),
 });
 const METADATA_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "agent", "seq", "title", "display_agent", "state_labels", "tokens"] as const;
 const COMPANION_METADATA_PARAM_KEYS = ["pane_id", "source", "applies_to_source", "seq", "title", "display_agent", "state_labels", "tokens"] as const;

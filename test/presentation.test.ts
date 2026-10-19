@@ -6,12 +6,12 @@ const interaction={version:2 as const,sessionEpoch:epoch,generation:1,sequence:1
 const aggregate={version:2 as const,sessionEpoch:epoch,generation:1,sequence:1,source:"subagent" as const,state:"running" as const,subagents:{running:2,cancelling:0,queued:1,completed:3,failed:4,cancelled:5,omitted:6}};
 const progress={version:2 as const,sessionEpoch:epoch,generation:1,sequence:1,source:"todo" as const,state:"running" as const,progress:{completed:3,total:5}};
 const waitingBlocked={version:2 as const,sessionEpoch:epoch,generation:1,sequence:1,source:"pi" as const,state:"waiting" as const,attention:{reason:"blocked" as const,occurrence:"new" as const}};
-test("V2 interaction is blocked without producer text",()=>{expect(compositeState([interaction],false)).toBe("blocked");expect(safeMessage("blocked",96,[interaction])).toBe("Pi needs your input");});
-test("accepted zero-pending V2 interaction remains an input lifecycle",()=>{const zero={...interaction,interaction:{kind:"ask_user" as const,pending:0}};expect(compositeState([zero],false)).toBe("blocked");expect(safeMessage("blocked",96,[zero])).toBe("Pi needs your input");expect(metadata([zero])).toMatchObject({summary:"input · input 0",v2_interaction:"ask_user:0",v2_attention:"input_required:new"});});
-test("native prompt state is fixed input without V2 prompt tokens",()=>{expect(compositeState([],true,true)).toBe("blocked");expect(safeMessage("blocked",96,[],true,true)).toBe("Pi needs your input");expect(metadata([],undefined,undefined,true,undefined,undefined,true)).toMatchObject({summary:"input",v2_attention:null,v2_interaction:null});});
-test("canonical waiting plus blocked attention retains fixed blocked pane presentation",()=>{expect(compositeState([waitingBlocked],false)).toBe("blocked");expect(safeMessage("blocked",96,[waitingBlocked])).toBe("Pi needs attention");expect(metadata([waitingBlocked]).v2_attention).toBe("blocked:new");});
-test("V2 live interaction remains notification eligible",()=>expect(attentionText(interaction,96)).toMatchObject({inputNeeded:true,body:"Pi needs your input"}));
-test("presentation keeps display agent and state labels fixed",()=>{expect(presentation()).toEqual({displayAgent:"Pi",labels:{idle:"Pi is idle",working:"Pi is working",blocked:"Pi needs attention",unknown:"Pi state unknown"}});});
+test("V2 interaction is blocked without producer text",()=>{expect(compositeState([interaction],false)).toBe("blocked");expect(safeMessage("blocked",96,[interaction])).toBe("Pi · ? Waiting for input");});
+test("accepted zero-pending V2 interaction remains an input lifecycle",()=>{const zero={...interaction,interaction:{kind:"ask_user" as const,pending:0}};expect(compositeState([zero],false)).toBe("blocked");expect(safeMessage("blocked",96,[zero])).toBe("Pi · ? Waiting for input");expect(metadata([zero])).toMatchObject({summary:"input · input 0",v2_interaction:"ask_user:0",v2_attention:"input_required:new"});});
+test("native prompt state is fixed input without V2 prompt tokens",()=>{expect(compositeState([],true,true)).toBe("blocked");expect(safeMessage("blocked",96,[],true,true)).toBe("Pi · ? Waiting for input");expect(metadata([],undefined,undefined,true,undefined,undefined,true)).toMatchObject({summary:"input",v2_attention:null,v2_interaction:null});});
+test("canonical waiting plus blocked attention retains fixed blocked pane presentation",()=>{expect(compositeState([waitingBlocked],false)).toBe("blocked");expect(safeMessage("blocked",96,[waitingBlocked])).toBe("Pi · ! Blocked");expect(metadata([waitingBlocked]).v2_attention).toBe("blocked:new");});
+test("V2 live interaction remains notification eligible",()=>expect(attentionText(interaction,96)).toMatchObject({inputNeeded:true,body:"Pi · ? Waiting for input"}));
+test("presentation keeps display agent and state labels fixed",()=>{expect(presentation()).toEqual({displayAgent:"Pi",labels:{idle:"Pi · ○ Idle",working:"Pi · ▶ Running",blocked:"Pi · ! Needs attention",unknown:"Pi · ? Unknown"}});});
 test("metadata has ten local keys with a compact complete safe summary",()=>{const tokens=metadata([progress,interaction,aggregate],undefined,{tokens:12,cost:0.25,contextPercent:50});expect(tokens).toEqual({summary:"input · 3/5 · running 2 · queued 1 · input 1",v2_progress:"3/5",v2_attention:"input_required:new",v2_interaction:"ask_user:1",v2_subagents:"2,0,1,3,4,5,6",v2_terminals:null,v2_terminal_overflow:null,tokens:"12",cost:"0.25",context:"50"});});
 test("cancellation-only aggregate summary displays stopping and hides zero running and queued segments",()=>{const tokens=metadata([{...aggregate,subagents:{running:0,cancelling:2,queued:0,completed:0,failed:0,cancelled:0,omitted:0}}]);expect(tokens.summary).toBe("working · stopping 2");});
 test("mixed aggregate summary displays active, stopping, and queued segments in fixed order",()=>{const tokens=metadata([{...aggregate,subagents:{running:2,cancelling:3,queued:4,completed:0,failed:0,cancelled:0,omitted:0}}]);expect(tokens.summary).toBe("working · running 2 · stopping 3 · queued 4");});
@@ -46,3 +46,49 @@ test("latest terminal arrival is independent of canonical terminal order",()=>{
 test("metadata never exposes epochs or source text",()=>{const result=metadata([aggregate]);expect(JSON.stringify(result)).not.toContain(epoch);});
 test("metadata attention priority is deterministic across reverse insertion",()=>{const blocked={...waitingBlocked,attention:{reason:"blocked" as const,occurrence:"new" as const}};const failure={...aggregate,source:"subagent" as const,state:"error" as const,attention:{reason:"failure" as const,occurrence:"new" as const}};const retainedInput={...interaction,attention:{reason:"input_required" as const,occurrence:"retained" as const}};const liveInput={...interaction,generation:2,attention:{reason:"input_required" as const,occurrence:"new" as const}};for(const events of [[blocked,failure,retainedInput,liveInput],[liveInput,retainedInput,failure,blocked]])expect(metadata(events).v2_attention).toBe("input_required:new");});
 test("metadata progress priority is todo then subagent then pi independent of insertion",()=>{const pi={...progress,source:"pi" as const,progress:{completed:1,total:9}};const subagent={...aggregate,progress:{completed:2,total:9}};const todo={...progress,progress:{completed:3,total:9}};for(const events of [[pi,subagent,todo],[todo,subagent,pi]])expect(metadata(events).v2_progress).toBe("3/9");});
+
+test("human messages distinguish known activity without changing lifecycle enums or metadata", () => {
+ const failure = { ...waitingBlocked, state: "error" as const, attention: { reason: "failure" as const, occurrence: "new" as const } };
+ const waiting = { ...waitingBlocked, attention: undefined };
+ expect(safeMessage("blocked", 96, [failure])).toBe("Pi · ✗ Failed");
+ expect(safeMessage("blocked", 96, [failure, interaction])).toBe("Pi · ? Waiting for input");
+ expect(safeMessage("blocked", 96, [failure], false, true)).toBe("Pi · ? Waiting for input");
+ expect(safeMessage("working", 96, [waiting])).toBe("Pi · ◷ Waiting");
+ expect(safeMessage("working", 96, [waiting], true)).toBe("Pi · ▶ Running");
+ expect(safeMessage("working", 96, [waiting, progress])).toBe("Pi · ▶ Running");
+ expect(safeMessage("working", 96)).toBe("Pi · ▶ Running");
+ expect(safeMessage("idle", 96)).toBe("Pi · ○ Idle");
+ expect(safeMessage("unknown", 96)).toBe("Pi · ? Unknown");
+ // Historical failed counts are not a live failure; only accepted state proves it.
+ expect(safeMessage("working", 96, [aggregate])).toBe("Subagents · ▶ Running");
+ expect(safeMessage("working", 96, [{ ...aggregate, subagents: { ...aggregate.subagents, running: 0, cancelling: 2 } }])).toBe("Subagents · ■ Stopping");
+ expect(safeMessage("working", 96, [{ ...aggregate, subagents: { ...aggregate.subagents, running: 0 } }])).toBe("Subagents · ◷ Queued");
+ expect(compositeState([waiting], false)).toBe("working");
+ expect(metadata([failure]).summary).toBe("blocked");
+ expect(metadata([waiting]).summary).toBe("working");
+});
+
+test("static attention copy distinguishes failure from blocked without claiming completion", () => {
+ expect(attentionText(waitingBlocked, 96)).toEqual({ title: "Pi · ! Blocked", body: "A Pi task is blocked", error: true, inputNeeded: false });
+ expect(attentionText({ ...waitingBlocked, state: "error", attention: { reason: "failure", occurrence: "new" } }, 96)).toEqual({ title: "Pi · ✗ Failed", body: "A Pi task failed", error: true, inputNeeded: false });
+ expect(attentionText({ ...interaction, attention: { reason: "input_required", occurrence: "retained" } }, 96)).toBeNull();
+ expect(attentionText({ ...waitingBlocked, attention: undefined }, 96)).toBeNull();
+});
+
+test("human copy respects Unicode budgets and never adds glyphs to canonical summary tokens", () => {
+ for (const max of [16, 24, 96]) {
+  const message = safeMessage("blocked", max, [interaction]);
+  const notice = attentionText(interaction, max)!;
+  for (const value of [message, notice.title, notice.body]) {
+   expect([...value].length).toBeLessThanOrEqual(max);
+   expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(128);
+   expect(value).not.toContain("�");
+  }
+ }
+ for (const outcome of ["completed", "failed", "cancelled"] as const) {
+  const batch = encodeTerminalBatch([{ version: 2, sessionEpoch: epoch, generation: 1, sequence: 1, source: "pi", eventId: 1, outcome }]);
+  const tokens = metadata([], batch, undefined, false, undefined, outcome);
+  expect(tokens.summary).toBe(`idle · terminal ${outcome}`);
+  expect(tokens.v2_terminals).toBe(`pi:1:1:${outcome}`);
+ }
+});

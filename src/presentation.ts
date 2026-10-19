@@ -56,13 +56,14 @@ export function safeMessage(state: HerdrState, max: number, events: readonly Pre
   const aggregate = subagents(events);
   const category = blockedPresentationCategory(events, nativePromptWaiting);
   const text = state === "blocked"
-    ? category === "ask-user" ? "Pi needs your input" : "Pi needs attention"
-    : state === "working" && parentActive ? "Pi is working"
-    : state === "working" && aggregate?.cancelling ? "Subagents are stopping"
-    : state === "working" && aggregate?.running ? "Subagents are working"
-    : state === "working" && aggregate?.queued ? "Subagents are queued"
-    : state === "working" ? "Pi is working"
-    : state === "idle" ? "Pi is idle" : "Pi state unknown";
+    ? category === "ask-user" ? "Pi · ? Waiting for input" : events.some(hasFailure) ? "Pi · ✗ Failed" : "Pi · ! Blocked"
+    : state === "working" && parentActive ? "Pi · ▶ Running"
+    : state === "working" && aggregate?.cancelling ? "Subagents · ■ Stopping"
+    : state === "working" && aggregate?.running ? "Subagents · ▶ Running"
+    : state === "working" && aggregate?.queued ? "Subagents · ◷ Queued"
+    : state === "working" && events.some(event => event.state === "waiting") && !events.some(event => event.state === "running") ? "Pi · ◷ Waiting"
+    : state === "working" ? "Pi · ▶ Running"
+    : state === "idle" ? "Pi · ○ Idle" : "Pi · ? Unknown";
   return boundedPresenceText(text, { maxBytes: 128, maxCodePoints: max });
 }
 
@@ -134,8 +135,8 @@ export function attentionText(event: PresenceStateV2, max: number): { title: str
   const inputNeeded = isLiveInputRequest(event);
   const error = reason === "failure" || reason === "blocked";
   return {
-    title: boundedPresenceText(inputNeeded ? "Pi needs your input" : error ? "Pi needs attention" : "Pi update", { maxBytes: 128, maxCodePoints: max }),
-    body: boundedPresenceText(inputNeeded ? "Pi needs your input" : error ? "A Pi task needs attention" : "Pi activity completed", { maxBytes: 512, maxCodePoints: max }),
+    title: boundedPresenceText(inputNeeded ? "Pi · ? Waiting for input" : reason === "failure" ? "Pi · ✗ Failed" : reason === "blocked" ? "Pi · ! Blocked" : "Pi · ℹ Update", { maxBytes: 128, maxCodePoints: max }),
+    body: boundedPresenceText(inputNeeded ? "Pi · ? Waiting for input" : reason === "failure" ? "A Pi task failed" : reason === "blocked" ? "A Pi task is blocked" : "Pi activity updated", { maxBytes: 512, maxCodePoints: max }),
     error,
     inputNeeded,
   };

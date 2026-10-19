@@ -130,7 +130,7 @@ const isExactAgentReport = (params: Record<string, unknown>) =>
 	params.source === "herdr:pi" &&
 	params.agent === "pi" &&
 	params.state === "idle" &&
-	params.message === "Pi is idle" &&
+	params.message === "Pi · ○ Idle" &&
 	Number.isSafeInteger(params.seq) &&
 	params.agent_session_id === sessionId;
 const isExactAgentAuthorityClear = (params: Record<string, unknown>) =>
@@ -555,10 +555,10 @@ try {
 	assert.equal(terminalMetadata.params.title, `Pi · ${tokens.summary}`);
 	assert.equal(terminalMetadata.params.display_agent, "Pi");
 	assert.deepEqual(terminalMetadata.params.state_labels, {
-		idle: "Pi is idle",
-		working: "Pi is working",
-		blocked: "Pi needs attention",
-		unknown: "Pi state unknown",
+		idle: "Pi · ○ Idle",
+		working: "Pi · ▶ Running",
+		blocked: "Pi · ! Needs attention",
+		unknown: "Pi · ? Unknown",
 	});
 	assert.equal(tokens.v2_interaction, "ask_user:1");
 	assert.equal(tokens.v2_subagents, "0,0,0,1,0,0,0");

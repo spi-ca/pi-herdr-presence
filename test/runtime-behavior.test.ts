@@ -161,7 +161,7 @@ test("retained V2 state is consumed once and consumer-ready does not recurse thr
     await pause();
 
     expect(readyEvents).toBe(1);
-    expect(reportMessages(requests)).toContain("Subagents are working");
+    expect(reportMessages(requests)).toContain("Subagents · ▶ Running");
     expect(notices(requests)).toHaveLength(0);
     await runtime.shutdownSession((runtime as unknown as { context: object }).context);
   } finally {

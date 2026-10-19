@@ -1165,7 +1165,7 @@ export class PresenceRuntime {
     const lifecycle = this.inputLifecycle(lifecycleId);
     if (lifecycle) lifecycle.notificationKey = key;
     this.setInputNotificationStatus(lifecycleId, "pending");
-    const admitted = this.notify("attention", key, "Pi needs your input", "Pi needs your input", "local", lifecycleId);
+    const admitted = this.notify("attention", key, "Pi · ? Waiting for input", "Pi · ? Waiting for input", "local", lifecycleId);
     if (!admitted) this.setInputNotificationStatus(lifecycleId, "released");
     return admitted;
   }
@@ -1178,7 +1178,7 @@ export class PresenceRuntime {
     const lifecycle = this.inputLifecycle(lifecycleId);
     if (lifecycle) lifecycle.notificationKey = key;
     this.setInputNotificationStatus(lifecycleId, "pending");
-    const admitted = this.notify("attention", key, "Pi needs your input", "Pi needs your input", "local", lifecycleId);
+    const admitted = this.notify("attention", key, "Pi · ? Waiting for input", "Pi · ? Waiting for input", "local", lifecycleId);
     if (!admitted) this.setInputNotificationStatus(lifecycleId, "released");
     return admitted;
   }
@@ -1259,7 +1259,7 @@ export class PresenceRuntime {
     }
     if (overflow) {
       try {
-        this.notify("error", `input-failure-overflow:${lifecycle.id}`, "Pi needs attention", "A Pi task needs attention", "local");
+        this.notify("error", `input-failure-overflow:${lifecycle.id}`, "Pi · ✗ Failed", "A Pi task failed", "local");
       } catch { /* fallback output is observer-only */ }
     }
   }
@@ -1469,7 +1469,7 @@ export class PresenceRuntime {
       this.notifyTerminalFailure(key, origin);
       return;
     }
-    this.notify(severity, key, "Pi activity completed", "Pi activity completed", origin);
+    this.notify(severity, key, "Pi · ✓ Completed", "Pi · ✓ Completed", origin);
   }
 
   /** The terminal encoder sorts canonically; summary instead follows accepted arrival order. */
@@ -1547,7 +1547,7 @@ export class PresenceRuntime {
 
   /** A terminal-only failure cannot be derived by unmodified Herdr from the V2 token map. */
   private notifyTerminalFailure(key: string, origin: "local" | "external"): boolean {
-    return this.notify("error", key, "Pi needs attention", "A Pi task needs attention", origin);
+    return this.notify("error", key, "Pi · ✗ Failed", "A Pi task failed", origin);
   }
 
   private scheduleTerminalClear() {
@@ -1694,7 +1694,7 @@ export class PresenceRuntime {
       return;
     }
     this.longRunningNotified = true;
-    this.notify("long-running", `long-running:${turn}`, "Pi is still working", "A Pi task is taking longer than expected", "local");
+    this.notify("long-running", `long-running:${turn}`, "Pi · ▶ Still running", "A Pi task is taking longer than expected", "local");
   }
 
   /** Final settlement, replacement, and shutdown erase every timer fence and budget. */

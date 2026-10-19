@@ -25,7 +25,23 @@ Every ordinary pane metadata render has exactly these ten keys:
 - `v2_terminals`, `v2_terminal_overflow`
 - `tokens`, `cost`, `context`
 
-Unavailable values are `null` except `summary`, which is always a bounded safe-derived grammar. The title is exactly `Pi · ${summary}`. `display_agent` is fixed to `Pi`; `state_labels` are fixed to `Pi is idle`, `Pi is working`, `Pi needs attention`, and `Pi state unknown`. No arbitrary context enters these fields.
+사용할 수 없는 값은 `summary`를 제외하고 `null`이다. `summary`는 기존의 제한된 안전 파생 문법을 유지하며, title은 정확히 `Pi · ${summary}`, `display_agent`는 `Pi`이다. `state_labels`의 키는 기존 `idle`, `working`, `blocked`, `unknown`을 유지하고 표시 문자열만 각각 `Pi · ○ Idle`, `Pi · ▶ Running`, `Pi · ! Needs attention`, `Pi · ? Unknown`으로 고정한다. 임의 컨텍스트는 이 필드에 들어가지 않는다.
+
+### 사람용 표시와 프로토콜 경계
+
+사람용 문자열은 **대상 → 의미 아이콘과 상태 → 필요한 세부사항** 순서의 짧은 영어를 사용한다. 아이콘만으로 상태를 구분하지 않으며, `pi-tool-display`를 import하거나 renderer·테마·실행 경로를 통합하지 않는다.
+
+| 표시 표면 | 표시와 한계 |
+| --- | --- |
+| Pane 고정 레이블 | 위 네 가지 문자열. Herdr의 `blocked`는 실패·차단·입력 대기를 모두 포함할 수 있으므로 고정 레이블은 `Needs attention`으로 유지한다. |
+| Standalone 상태 메시지 | `Pi · ▶ Running`, `Pi · ◷ Waiting`, `Pi · ? Waiting for input`, `Pi · ! Blocked`, `Pi · ✗ Failed`, `Pi · ○ Idle`, `Pi · ? Unknown`. 입력 대기가 실패보다 우선한다. 부모가 활동 중이거나 다른 실행 중 상태가 있으면 단순 대기 이벤트만으로 전체를 대기로 표시하지 않는다. |
+| Subagent 상태 메시지 | 부모가 활동 중이 아닐 때 `Subagents · ▶ Running`, `Subagents · ■ Stopping`, `Subagents · ◷ Queued`. 과거 실패 카운트만으로 현재 실패를 추정하지 않는다. |
+| 정책 허용 알림 | 입력 `Pi · ? Waiting for input`, 차단 `Pi · ! Blocked`, 실패 `Pi · ✗ Failed`, 완료 `Pi · ✓ Completed`, 장기 실행 `Pi · ▶ Still running`. 본문은 정적 텍스트이며 정책·소리·중복 억제·전송 예약은 변경하지 않는다. |
+| Title, pane `summary`, workspace `main_summary` | 기존 title 식과 canonical 문법을 유지한다. `running N`, `stopping N`, `queued N`, 진행률과 `input N`, `terminal completed/failed/cancelled`가 필수 세부사항을 전달한다. 토큰에 새 아이콘이나 키를 넣지 않는다. |
+| Companion 입력 lease | managed integration으로 전달하는 `herdr:blocked`와 기존 `Pi needs your input` lease 레이블은 그대로다. managed 상태 메시지를 이 확장이 직접 바꾸지 않는다. |
+| 도움말·진단 | 별도 명령·도움말·진단 UI가 없다. 관찰 실패는 계속 output-only로 처리한다. |
+
+완료·실패·취소는 알려진 terminal outcome을 기존 summary로 구분하며, `idle`을 완료로 바꾸지 않는다. 취소는 여전히 알림 없이 표시만 한다. Title과 workspace summary는 wire 계약이므로 사람용 문자열과 달리 번역·아이콘 치환하지 않는다. 자동 검증은 가짜 Unix socket을 사용하며 실제 Herdr의 글꼴·아이콘 폭·화면 배치는 별도 검증 범위다.
 
 The summary retains `working` or `idle` and may append the latest accepted terminal arrival as `terminal completed`, `terminal cancelled`, or `terminal failed`. Within the 80-byte/code-point budget, the state is always retained; space for the applicable V2 `input N` or terminal suffix is reserved first; then `progress`, positive `running`, positive `stopping`, and positive `queued` segments are attempted in that order before the reserved suffix is appended. Zero counts and lower-priority segments that do not fit are omitted. Blocked, input, and failure state take precedence over the transient terminal segment. A native-only TUI prompt uses the fixed `summary: "input"` while both V2 input tokens remain `null`. An accepted V2 `interaction`/`waiting` DTO remains input-waiting at the shared protocol's inclusive `pending: 0` boundary, so its projection is `ask_user:0` and `input 0`; malformed raw counts remain rejected by the shared parser. `v2_terminals` is independently canonically encoded and can have a different sort order. Terminal records, the terminal summary segment, and both terminal tokens clear together after `PI_HERDR_PRESENCE_FINAL_CLEAR_MS`.
 
@@ -40,7 +56,7 @@ Companion mode bridges aggregate native TUI prompt-or-accepted V2 `ask_user` wai
 
 ## 네이티브 입력 집계
 
-네이티브 `ui_prompt_start`는 프롬프트 본문·선택지·응답을 보관하거나 전송하지 않는다. 비동기 시작 중에는 세션 ID와 epoch에 묶인 불리언 대기 상태만 보관하고, 정확히 같은 TUI 세션이 활성화될 때만 채택한다. 교체·종료·비-TUI 또는 오래된 이벤트는 폐기한다. 네이티브 프롬프트와 수락된 V2 `ask_user`는 도착 순서와 관계없이 하나의 입력 수명주기로 집계된다. 알림 정책이 허용하면 이 수명주기는 고정된 `Pi needs your input` 제목과 본문으로 알림을 정확히 한 번만 낸다.
+네이티브 `ui_prompt_start`는 프롬프트 본문·선택지·응답을 보관하거나 전송하지 않는다. 비동기 시작 중에는 세션 ID와 epoch에 묶인 불리언 대기 상태만 보관하고, 정확히 같은 TUI 세션이 활성화될 때만 채택한다. 교체·종료·비-TUI 또는 오래된 이벤트는 폐기한다. 네이티브 프롬프트와 수락된 V2 `ask_user`는 도착 순서와 관계없이 하나의 입력 수명주기로 집계된다. 알림 정책이 허용하면 이 수명주기는 고정된 `Pi · ? Waiting for input` 제목과 본문으로 알림을 정확히 한 번만 낸다.
 
 Both ordinary envelopes include `pane_id`, a process-coordinated `seq`, title, fixed display fields, and the exact ten-token map.
 
