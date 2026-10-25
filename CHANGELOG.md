@@ -2,6 +2,8 @@
 
 ## 미출시
 
+- 정상적으로 시작된 standalone Pi 세션을 `/reload`할 때 기존 Herdr 세션 참조를 지우지 않도록 수정했습니다. Pi의 `reload` 시작 사유는 Herdr의 `resume`으로 전달하며, 실제 종료·세션 교체·시작 실패의 authority 정리와 companion 소유권은 유지합니다. 이미 누락된 세션 참조의 복구나 실제 Herdr smoke 통과를 주장하지 않습니다.
+
 - Pi 개발 의존성·lockfile·baseline CI graph를 exact `1.4.0`으로 갱신했습니다. 구버전 `0.85.1` lane, host peer `*`, `@pi/presence` Git pin과 observer-only runtime 계약은 유지합니다. Pi 자체의 resumed-tool 활성화·dialog stacking·terminal cleanup 변경은 이 확장으로 복제하지 않습니다.
 
 - Herdr 호환성 기준을 `v0.9.5` / protocol `22`로 갱신했습니다. 설치된 `v0.9.3`–`v0.9.5`의 전체 bundled API schema가 동일함을 확인했으며, 기존 allowlist·호출 계약·managed integration asset `9`는 유지합니다. 실제 `v0.9.5` 서버/UI smoke 통과를 주장하지 않습니다.

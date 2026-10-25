@@ -72,6 +72,7 @@ type PendingLifecycleEdge =
   | { kind: "message_end"; usage: DerivedUsage }
   | { kind: "tool_result"; failed: boolean; todo?: DerivedTodo };
 type PendingLifecycle = { epoch: number; id: string; manager: SessionManagerProvider; context: ContextUsageProvider; edges: PendingLifecycleEdge[]; overflow: boolean; nativePromptWaiting: boolean; nativePromptAcceptedAt: number | null };
+type PendingReloadShutdown = { epoch: number; id: string; manager: SessionManagerProvider; client: PresenceClient; authorityGeneration: number; cancelled: boolean; settled: Promise<void> };
 type PendingNotificationCandidate =
   | { kind: "input"; acceptedAt: number }
   | { kind: "state"; event: PresenceStateV2; inputPresent: boolean; acceptedAt: number; failureKey?: string }
@@ -161,6 +162,7 @@ function deriveExplicitTerminal(event: unknown): Terminal | undefined {
 export class PresenceRuntime {
   private todo = new TodoProgressAdapter();
   private client: PresenceClient | null = null;
+  private clientIdentity: ReturnType<typeof readHerdrIdentity> = null;
   /** Process-global ownership fences a stale cache-busted runtime's teardown. */
   private authorityGeneration: number | null = null;
   /** Selected only after the managed-hook probe; disabled never acquires local resources. */
@@ -205,6 +207,8 @@ export class PresenceRuntime {
   private ownerEpoch = 0;
   /** One startup can retain only one immediate lifecycle edge sequence. */
   private pendingLifecycle: PendingLifecycle | null = null;
+  /** Only the captured preserving shutdown can be downgraded by its owner's quit. */
+  private pendingReloadShutdown: PendingReloadShutdown | null = null;
   private transitions: Promise<void> = Promise.resolve();
   /** At most one stale startup and one newest replacement can await a probe. */
   private queuedStartup: { work: () => Promise<void>; resolve: () => void } | null = null;
@@ -267,6 +271,9 @@ export class PresenceRuntime {
 
   async startSession(context: unknown, event?: unknown) {
     const deadlineAt = this.lifecycleDeadline();
+    const incoming = session(context);
+    const preserveClient = (event as { reason?: unknown } | undefined)?.reason === "reload"
+      && incoming && this.reloadAuthorityEligible(incoming.manager, incoming.id) ? this.client : null;
     // Advance the callback fence before cancelling old notifications: deferred
     // release callbacks must not revive old fallbacks.
     const epoch = ++this.epoch;
@@ -286,12 +293,12 @@ export class PresenceRuntime {
     this.notificationAcceptanceTime = 0;
     // A replacement must not leave the previous consumer able to accept same-tick ingress.
     this.ingressEpoch = null;
-    const current = session(context);
+    const current = incoming;
     this.pendingLifecycle = (context as { mode?: unknown })?.mode === "tui" && current
       ? { epoch, id: current.id, manager: current.manager, context: context as ContextUsageProvider, edges: [], overflow: false, nativePromptWaiting: false, nativePromptAcceptedAt: null }
       : null;
     return this.settleByDeadline(
-      this.queueStartup(() => this.beginSession(context, event, epoch, current, deadlineAt)),
+      this.queueStartup(() => this.beginSession(context, event, epoch, current, deadlineAt, preserveClient)),
       deadlineAt,
       () => this.abandonStartup(epoch),
     );
@@ -369,9 +376,11 @@ export class PresenceRuntime {
     }
   }
 
-  private async beginSession(context: unknown, event: unknown, epoch: number, current: RuntimeSession | null, deadlineAt: number) {
+  private async beginSession(context: unknown, event: unknown, epoch: number, current: RuntimeSession | null, deadlineAt: number, preserveClient: PresenceClient | null) {
     const startupDeadlineAt = this.startupWorkDeadline(deadlineAt);
-    await this.teardown(deadlineAt);
+    // Preservation is only valid for the lifecycle still owning this lane.
+    // A queued reload can be superseded after its caller captured the client.
+    await this.teardown(deadlineAt, epoch === this.epoch && this.client === preserveClient ? preserveClient : null, epoch);
     if (epoch !== this.epoch || this.expired(startupDeadlineAt)) { this.abandonStartup(epoch); return; }
     if ((context as { mode?: unknown })?.mode !== "tui") { this.abandonStartup(epoch); return; }
     const identity = readHerdrIdentity();
@@ -465,6 +474,7 @@ export class PresenceRuntime {
     // and closes locally without sending pane cleanup for this new owner.
     if (mode === "standalone") this.authorityGeneration = processCoordinator.claimAuthority();
     this.client = client;
+    this.clientIdentity = identity;
     try {
       // Standalone clears current/legacy ownership before restoring authority;
       // companion clears only its separately-owned presentation/token projection.
@@ -997,12 +1007,32 @@ export class PresenceRuntime {
     }
   }
 
-  async shutdownSession(context: object) {
-    const deadlineAt = this.lifecycleDeadline();
+  /** Never preserve an incomplete startup, mutated ID, stale owner, or companion authority. */
+  private reloadAuthorityEligible(manager: SessionManagerProvider | null, id: string | null): boolean {
+    return manager !== null && id !== null && this.mode === "standalone"
+      && this.client?.hasAcknowledgedSessionReport === true && this.outputReady && this.rootSession && this.consumerActive
+      && this.ownerEpoch === this.epoch && this.ingressEpoch === this.epoch
+      && manager === this.sessionManager && id === this.sessionId
+      && this.authorityGeneration !== null && processCoordinator.isAuthority(this.authorityGeneration);
+  }
+
+  async shutdownSession(context: object, reason?: unknown) {
     // An unfenced shutdown could tear down a replacement session. Unlike
     // ordinary callbacks, /fork may mutate the legitimate owner's ID before
     // Pi emits shutdown, so this fence intentionally checks manager + epoch.
+    const pendingReload = this.pendingReloadShutdown;
+    if (reason === "quit" && pendingReload && pendingReload.epoch === this.epoch
+      && processCoordinator.isAuthority(pendingReload.authorityGeneration)) {
+      const owner = session(context);
+      if (owner?.manager === pendingReload.manager && owner.id === pendingReload.id) {
+        pendingReload.cancelled = true;
+        return pendingReload.settled;
+      }
+    }
     if (!this.shutdownSessionFence(context) && !this.pendingShutdownFence(context)) return;
+    const deadlineAt = this.lifecycleDeadline();
+    const current = reason === "reload" ? session(context) : null;
+    const preserveClient = current && this.reloadAuthorityEligible(current.manager, current.id) ? this.client : null;
     // Fence and abort observer eligibility before queued lifecycle teardown.
     this.releaseCompanionBlocked();
     this.nativePromptEpoch = null;
@@ -1022,8 +1052,21 @@ export class PresenceRuntime {
     // Reserve this teardown synchronously. A cache-busted replacement can queue
     // startup immediately afterwards, but cannot acquire authority before this
     // client's bounded remote cleanup has completed.
-    const cleanup = processCoordinator.enqueueAuthority(() => this.transition(() => this.teardown(deadlineAt)));
-    return this.settleByDeadline(cleanup, deadlineAt);
+    const reload: PendingReloadShutdown | null = preserveClient && current && this.authorityGeneration !== null
+      ? { epoch: this.epoch, id: current.id, manager: current.manager, client: preserveClient,
+          authorityGeneration: this.authorityGeneration, cancelled: false, settled: Promise.resolve() }
+      : null;
+    if (reload) this.pendingReloadShutdown = reload;
+    const cleanup = processCoordinator.enqueueAuthority(() => this.transition(async () => {
+      try {
+        const preserving = reload && this.pendingReloadShutdown === reload && reload.epoch === this.epoch
+          && !reload.cancelled && this.client === reload.client ? reload.client : null;
+        await this.teardown(deadlineAt, preserving, undefined, reload);
+      } finally { if (this.pendingReloadShutdown === reload) this.pendingReloadShutdown = null; }
+    }));
+    const settled = this.settleByDeadline(cleanup, deadlineAt);
+    if (reload) reload.settled = settled;
+    return settled;
   }
 
   private publish(state: "idle" | "running") {
@@ -1786,12 +1829,14 @@ export class PresenceRuntime {
     this.failureCorrelation.clear();
   }
 
-  private async teardown(deadlineAt?: number) {
+  private async teardown(deadlineAt?: number, preserveClient: PresenceClient | null = null, preserveEpoch?: number, reload?: PendingReloadShutdown | null) {
     // Detach the remote handle before local cleanup. An unowned activation
     // failure calls teardownLocal directly and therefore never reaches socket output.
     const client = this.client;
+    const identity = this.clientIdentity;
     const authorityGeneration = this.authorityGeneration;
     this.client = null;
+    this.clientIdentity = null;
     this.authorityGeneration = null;
     const mode = this.mode;
     this.mode = "disabled";
@@ -1799,7 +1844,7 @@ export class PresenceRuntime {
     if (!client) return;
     const teardownClient = async () => {
       if (deadlineAt === undefined) { await client.teardown(this.config.timeoutMs).catch(() => {}); return; }
-      await client.teardownUntil(deadlineAt).catch(() => {});
+      await client.teardownUntil(deadlineAt, client === preserveClient && mode === "standalone" && authorityGeneration !== null && processCoordinator.isAuthority(authorityGeneration)).catch(() => {});
     };
     if (mode === "companion") {
       await teardownClient();
@@ -1807,6 +1852,13 @@ export class PresenceRuntime {
     }
     if (authorityGeneration !== null && processCoordinator.isAuthority(authorityGeneration)) {
       await teardownClient();
+      // Recheck ownership immediately before the one best-effort rollback. A
+      // closed preserving client cannot be reused; its original deadline still
+      // bounds this attempt, including time spent waiting in the authority lane.
+      if (client === preserveClient && identity && ((preserveEpoch !== undefined && preserveEpoch !== this.epoch)
+        || (reload && (reload.cancelled || reload.epoch !== this.epoch)))
+        && processCoordinator.isAuthority(authorityGeneration) && deadlineAt !== undefined && !this.expired(deadlineAt))
+        await PresenceClient.rollbackPreservedAuthorityOnce(identity, this.config, deadlineAt);
       processCoordinator.releaseAuthority(authorityGeneration);
     } else await client.close(0).catch(() => {});
   }
