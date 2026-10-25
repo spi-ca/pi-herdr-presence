@@ -37,6 +37,7 @@ Tests are intentionally layered:
 
 - **Unit/module tests** cover configuration parsing, marker and identity validation, V2/presentation/protocol reducers, notification policy, Todo aggregate-only projection, queue semantics, and `WorkspaceSummaryLease` completion-relative timer behavior.
 - **Integration-like Unix-socket tests** use real local Unix sockets to exercise request framing, EOF/multiple-line rejection, fingerprint validation, deadlines, queue recovery, client envelopes, runtime startup/teardown, and workspace `pane.list` eligibility. They do not require a real Herdr service.
+- **Reload continuity regression** (`test/reload-continuity.test.ts`) uses a local socket and a stateful, deliberately narrow Herdr v0.9.5 session anchor/HookClear acceptance model. It checks accepted persisted session and state, not just emitted envelopes, across idle/active cache-busted reload and same-runtime reload. The fixture is not a full Herdr implementation or evidence of live Herdr behavior. Pi `reload` is mapped to Herdr `resume` only for the session-start envelope; the eligible old runtime must also avoid HookClear.
 - **Opt-in real smoke** uses a real Herdr socket and shared live producers. It is manual only and excluded from `bun run test`, coverage, and automatic CI.
 
 ## Herdr 0.9.5 호환성 확인

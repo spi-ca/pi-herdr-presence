@@ -47,6 +47,7 @@ export class PresenceClient {
 	private sessionAuthorityPrepared = false;
 	/** A standalone session write may establish authority before any response. */
 	private sessionAuthorityAttempted = false;
+	private sessionAuthorityAcknowledged = false;
 	private authorityClearAttempted = false;
 	private normalMetadataStarted = false;
 	private workspaceSummaryRequest: Promise<void> | null = null;
@@ -71,6 +72,20 @@ export class PresenceClient {
 			Math.max(1_000, config.timeoutMs * (config.maxQueue + 1)),
 		);
 	}
+	/** A superseded preserving teardown has closed its client. Make one priority
+	 * rollback attempt with its original lifecycle deadline, never a new budget. */
+	static async rollbackPreservedAuthorityOnce(identity: HerdrIdentity, config: PresenceConfig, deadlineAt: number): Promise<void> {
+		if (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now()) return;
+		const client = new PresenceClient(
+			identity,
+			new HerdrSocketTransport(identity.socketPath, config.timeoutMs, config.maxQueue),
+			config,
+		);
+		try {
+			await client.clearAgentAuthority(deadlineAt);
+		} catch { /* Remote rollback is best effort. */ }
+		finally { await client.close(0).catch(() => {}); }
+	}
 	private get companion(): boolean {
 		return this.mode === "companion";
 	}
@@ -84,7 +99,7 @@ export class PresenceClient {
 		// A valid write can establish server-side authority even if the response is
 		// lost or malformed. Conservatively reserve priority rollback before it.
 		this.sessionAuthorityAttempted = true;
-		await this.send(
+		if (await this.send(
 			"pane.report_agent_session",
 			{
 				pane_id: this.identity.paneId,
@@ -92,7 +107,7 @@ export class PresenceClient {
 				agent: "pi",
 				seq,
 				...(safeSessionStartReason(reason)
-					? { session_start_source: reason }
+					? { session_start_source: reason === "reload" ? "resume" : reason }
 					: {}),
 				...sessionRef,
 			},
@@ -102,7 +117,11 @@ export class PresenceClient {
 			true,
 			false,
 			deadlineAt,
-		);
+		)) this.sessionAuthorityAcknowledged = true;
+	}
+	/** A lost response may have installed authority, but is not proof for reload preservation. */
+	get hasAcknowledgedSessionReport(): boolean {
+		return this.sessionAuthorityAcknowledged;
 	}
 	async report(
 		state: "idle" | "working" | "blocked" | "unknown",
@@ -447,14 +466,15 @@ export class PresenceClient {
 		const budget = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : this.config.timeoutMs;
 		return this.teardownUntil(Date.now() + budget);
 	}
-	teardownUntil(deadlineAt: number): Promise<void> {
+	/** Only a completed same-session Pi reload may retain Herdr lifecycle authority. */
+	teardownUntil(deadlineAt: number, preserveSessionAuthority = false): Promise<void> {
 		if (this.teardownPromise) return this.teardownPromise;
 		if (this.closed) return Promise.resolve();
 		this.fenceOrdinaryOutput();
-		this.teardownPromise = this.performTeardown(deadlineAt);
+		this.teardownPromise = this.performTeardown(deadlineAt, preserveSessionAuthority);
 		return this.teardownPromise;
 	}
-	private async performTeardown(deadlineAt: number): Promise<void> {
+	private async performTeardown(deadlineAt: number, preserveSessionAuthority: boolean): Promise<void> {
 		if (this.expired(deadlineAt)) {
 			await this.close(0).catch(() => {});
 			return;
@@ -473,7 +493,7 @@ export class PresenceClient {
 		try {
 			// Session authority can outlive a lost, malformed, or acknowledged startup
 			// response. Roll it back before presentation cleanup consumes the reserve.
-			if (!this.companion && this.sessionAuthorityAttempted)
+			if (!preserveSessionAuthority && !this.companion && this.sessionAuthorityAttempted)
 				await Promise.race([
 					this.clearAgentAuthority(deadlineAt).catch(() => {}),
 					expires,
@@ -485,7 +505,7 @@ export class PresenceClient {
 					this.clearLegacyMetadataOnTeardown(deadlineAt).catch(() => {}),
 					expires,
 				]);
-			if (!expired && !this.closed && !this.companion)
+			if (!expired && !this.closed && !this.companion && !preserveSessionAuthority)
 				await Promise.race([
 					this.clearAgentAuthority(deadlineAt).catch(() => {}),
 					expires,
