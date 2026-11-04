@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-presence",
-  "version": "0.1.1",
+  "version": "2026.1104.2",
   "main": "index.ts",
   "devDependencies": {
     "@biomejs/biome": "2.3.14",
