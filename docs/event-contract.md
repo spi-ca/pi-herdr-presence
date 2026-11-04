@@ -16,6 +16,8 @@ Only a top-level tool result (`parentToolCallId` absent or an own data value of 
 
 Pi `1.1.0` separately reports [Program Status Protocol (OSC 7501)](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/terminal-setup.md#program-status) state when the terminal confirms support. Pi owns detection and the `PI_PROGRAM_STATUS=1|0` override. Native reports can contain the session name, dialog title, or first error line; these are not inputs to this extension's privacy-bounded Herdr projection. This extension neither emits duplicate OSC reports nor sends terminal commands, and never forwards native report text. Native reporting does not replace the Herdr Unix-socket protocol, shared V2 events, or standalone/companion authority boundaries.
 
+Pi `1.5.0` adds `ctx.ui.custom(..., { blocked: { kind, message } })` for native program status while an inline component is visible; overlays ignore it. This option does not replace or redefine aggregate `ui_prompt_start`/`ui_prompt_end` spans. Presence still consumes those content-free lifecycle edges and accepted V2 `ask_user` waiting state, and companion mode still delegates one balanced fixed-label `herdr:blocked` lease to the managed integration. It does not inspect native `blocked` options/messages or turn them into socket reports. See [Pi 1.5 host-owned behavior](development.md#pi-15-host-owned-behavior).
+
 ## Pane projection
 
 Every ordinary pane metadata render has exactly these ten keys:

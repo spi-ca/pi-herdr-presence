@@ -1,6 +1,9 @@
 # 변경 이력
 
-## 미출시
+## [0.1.1]
+
+- Pi 개발 의존성·lockfile·baseline CI graph를 `pi-schema`를 포함한 exact `1.5.0`으로 갱신했습니다. 구버전 `0.85.1` lane, host peer `*`, shared presence immutable pin과 standalone/companion authority는 유지합니다. Pi 1.5의 inline custom UI `blocked`는 표시 중인 컴포넌트의 네이티브 program status 전용이며, 기존 prompt span·V2 집계·balanced `herdr:blocked` lease를 대체하지 않습니다.
+- 패키지 버전을 `0.1.1`로 올리고 기존 미출시 항목과 이번 변경을 root `CHANGELOG.md`의 네이티브 호환 버전 제목 아래 묶었습니다. Pi 1.5의 Extension Updates는 다음 fresh launch에서 증가한 패키지 버전의 이 파일을 기본으로 읽습니다. 별도 changelog 설정이나 런타임 UI는 추가하지 않습니다.
 
 - Pi 개발 의존성·lockfile·baseline CI graph를 exact `1.4.0`으로 갱신했습니다. 구버전 `0.85.1` lane, host peer `*`, `@pi/presence` Git pin과 observer-only runtime 계약은 유지합니다. Pi 자체의 resumed-tool 활성화·dialog stacking·terminal cleanup 변경은 이 확장으로 복제하지 않습니다.
 
