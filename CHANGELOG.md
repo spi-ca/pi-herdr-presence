@@ -1,5 +1,10 @@
 # 변경 이력
 
+## [2026.1104.2]
+
+- 패키지 버전을 날짜 기반 `2026.1104.2`로 갱신했습니다. 대응하는 릴리스 태그는 `v20261104-2`이며, 기존 `0.1.1` 변경 이력은 아래에 보존합니다.
+- 패키지 버전과 변경 이력만 정리하며 Pi 개발 의존성·host peer·shared presence pin·런타임·프로토콜 계약은 변경하지 않습니다.
+
 ## [0.1.1]
 
 - Pi 개발 의존성·lockfile·baseline CI graph를 `pi-schema`를 포함한 exact `1.5.0`으로 갱신했습니다. 구버전 `0.85.1` lane, host peer `*`, shared presence immutable pin과 standalone/companion authority는 유지합니다. Pi 1.5의 inline custom UI `blocked`는 표시 중인 컴포넌트의 네이티브 program status 전용이며, 기존 prompt span·V2 집계·balanced `herdr:blocked` lease를 대체하지 않습니다.
