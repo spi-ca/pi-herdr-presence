@@ -15,5 +15,5 @@ export function registerPresenceHooks(pi: ExtensionAPI, runtime: PresenceRuntime
  pi.on("tool_result", (event, context) => runtime.handleToolResult(event, context));
  pi.on("ui_prompt_start", (_event, context) => runtime.handleUiPromptStart(context));
  pi.on("ui_prompt_end", (_event, context) => runtime.handleUiPromptEnd(context));
- pi.on("session_shutdown", (_event, context) => runtime.shutdownSession(context).catch(() => {}));
+ pi.on("session_shutdown", (event, context) => runtime.shutdownSession(context, event.reason).catch(() => {}));
 }
