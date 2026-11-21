@@ -1,10 +1,10 @@
 {
   "name": "pi-herdr-presence",
-  "version": "2026.1104.2",
+  "version": "2026.1121.1",
   "main": "index.ts",
   "devDependencies": {
     "@biomejs/biome": "2.3.14",
-    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.1",
     "@types/node": "^25.2.3",
     "bun-types": "^1.3.14",
     "typescript": "^5.9.3"
