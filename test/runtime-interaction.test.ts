@@ -436,6 +436,9 @@ serial(
 			interaction.publishState(input(1));
 			subagent.publishState(failure(1));
 			await sleep(20);
+			// A delay alone does not guarantee a socket write; withdrawing a pending
+			// input would cancel it and release the state-failure fallback instead.
+			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input"]));
 			subagent.publishTerminal({ version: 2, generation: 1, sequence: 2, source: "subagent", eventId: 1, outcome: "failed" });
 			interaction.withdraw({ version: 2, generation: 1, sequence: 2, source: "interaction" });
 			await eventually(() => expect(notices(requests).map((request) => request.params?.title)).toEqual(["Pi · ? Waiting for input", "Pi · ✗ Failed"]));
